@@ -219,7 +219,7 @@ def _scan_brain(brain: Path) -> Optional[Session]:
             return None
 
     return Session(
-        uuid=os.path.basename(brain.rstrip("/")),
+        uuid=brain.name,
         agent=AgentName.ANTIGRAVITY,
         title=_normalise_title(title),
         date=timestamp,

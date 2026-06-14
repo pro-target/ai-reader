@@ -204,13 +204,18 @@ def list_sessions(
     for db_path, conn in _iter_dbs(base_dir, override):
         try:
             conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            for row in cursor.execute(_SELECT_ALL_SESSIONS):
+            list_cursor = conn.cursor()
+            count_cursor = conn.cursor()
+            # Materialise the SELECT first: nesting ``execute`` on the
+            # same cursor would invalidate the iteration when we look
+            # up the per-session message count below.
+            rows = list(list_cursor.execute(_SELECT_ALL_SESSIONS))
+            for row in rows:
                 sid = row["id"]
                 if sid in seen_ids:
                     continue
                 seen_ids.add(sid)
-                count = cursor.execute(
+                count = count_cursor.execute(
                     _SELECT_MESSAGE_COUNT, (sid,)
                 ).fetchone()[0]
                 session = _row_to_session(row, db_path)
@@ -247,11 +252,12 @@ def _read_session_by_uuid(
     for db_path, conn in _iter_dbs(base_dir, override):
         try:
             conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            row = cursor.execute(_SELECT_SESSION, (uuid,)).fetchone()
+            session_cursor = conn.cursor()
+            count_cursor = conn.cursor()
+            row = session_cursor.execute(_SELECT_SESSION, (uuid,)).fetchone()
             if row is None:
                 continue
-            count = cursor.execute(
+            count = count_cursor.execute(
                 _SELECT_MESSAGE_COUNT, (uuid,)
             ).fetchone()[0]
             session = _row_to_session(row, db_path)
