@@ -1,0 +1,296 @@
+"""Antigravity session parser.
+
+Antigravity stores its "brain" (per-session scratchpad) in two
+locations that we know about, both with the same internal layout::
+
+    ~/.gemini/antigravity/brain/<session-uuid>/...
+    ~/.gemini/antigravity-cli/brain/<session-uuid>/...
+
+A brain directory contains:
+
+* ``.system_generated/logs/overview.txt``  — JSONL of meta events.
+  The first ``USER_EXPLICIT``/``USER_INPUT`` record whose content
+  contains ``<USER_REQUEST>...</USER_REQUEST>`` becomes the title.
+* ``.system_generated/logs/transcript.json`` or
+  ``.system_generated/logs/transcript_full.jsonl``  — full transcript
+  (newer variants).
+* ``walkthrough.md`` / ``task.md`` / ``task.md.resolved`` /
+  ``implementation_plan.md``  — markdown plan with a ``# Title``
+  heading.
+
+The directory is considered a session if any of these files exist;
+missing files degrade gracefully (we just report zero messages).
+
+The base directory can be overridden by ``base_dir`` (which then names
+a single brain directory) or by setting ``$AI_READER_HOME/.gemini``
+and ``$AI_READER_HOME/.gemini-cli``.  When unset we look at
+``~/.gemini/antigravity/brain`` and ``~/.gemini/antigravity-cli/brain``.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Optional
+
+from .models import AgentName, Session
+
+
+_TITLE_MAX_LEN = 100
+_USER_REQUEST_RE = re.compile(
+    r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.DOTALL
+)
+_HEADING_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
+_MARKDOWN_CANDIDATES: tuple[str, ...] = (
+    "implementation_plan.md",
+    "walkthrough.md",
+    "task.md.resolved",
+    "task.md",
+)
+_TRANSCRIPT_CANDIDATES: tuple[str, ...] = (
+    ".system_generated/logs/transcript.json",
+    ".system_generated/logs/transcript_full.jsonl",
+    ".system_generated/logs/transcript.jsonl",
+)
+_OVERVIEW = ".system_generated/logs/overview.txt"
+
+
+def _resolve_brain_roots(
+    base_dir: Optional[str] = None,
+) -> List[Path]:
+    """Return the list of brain roots to scan, in priority order.
+
+    When ``base_dir`` is supplied, it is treated as a single brain
+    directory and returned as-is.  Otherwise we look at the two known
+    installations under ``$AI_READER_HOME/.gemini`` (if set) or
+    ``~/.gemini``.
+    """
+    if base_dir:
+        return [Path(base_dir).expanduser()]
+
+    env_home = os.environ.get("AI_READER_HOME")
+    if env_home:
+        root = Path(env_home).expanduser() / ".gemini"
+    else:
+        root = Path("~/.gemini").expanduser()
+
+    roots = [
+        root / "antigravity-cli" / "brain",
+        root / "antigravity" / "brain",
+    ]
+    return [r for r in roots if r.is_dir()]
+
+
+def _parse_iso_timestamp(raw: str) -> Optional[datetime]:
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw[:23].replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _normalise_title(raw: str) -> str:
+    cleaned = raw.replace("\n", " ").replace("\r", " ").strip()
+    return cleaned[:_TITLE_MAX_LEN] or "Untitled"
+
+
+def _extract_title_from_overview(overview_path: Path) -> tuple[str, int, Optional[str]]:
+    """Return ``(title, message_count, latest_timestamp_iso)`` from overview.txt."""
+    title = ""
+    count = 0
+    latest_ts: Optional[str] = None
+    try:
+        with overview_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                count += 1
+                ts = record.get("timestamp")
+                if isinstance(ts, str):
+                    latest_ts = ts
+                if not title and record.get("source") == "USER_EXPLICIT" \
+                        and record.get("type") == "USER_INPUT":
+                    raw_content = record.get("content", "")
+                    if isinstance(raw_content, str) and raw_content:
+                        match = _USER_REQUEST_RE.search(raw_content)
+                        if match:
+                            title = match.group(1)
+                        else:
+                            title = raw_content
+    except OSError:
+        return "", 0, None
+    return title, count, latest_ts
+
+
+def _extract_title_from_markdown(brain: Path) -> str:
+    """Return the first ``# Heading`` found in any of the markdown plans."""
+    for name in _MARKDOWN_CANDIDATES:
+        path = brain / name
+        if not path.is_file():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = fh.read(_TITLE_MAX_LEN * 4)
+        except OSError:
+            continue
+        match = _HEADING_RE.search(data)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _scan_brain(brain: Path) -> Optional[Session]:
+    """Build a :class:`Session` from one brain directory."""
+    if not brain.is_dir():
+        return None
+
+    title = ""
+    count = 0
+    latest_ts: Optional[str] = None
+
+    overview = brain / _OVERVIEW
+    if overview.is_file():
+        title, count, latest_ts = _extract_title_from_overview(overview)
+
+    if not title:
+        title = _extract_title_from_markdown(brain)
+
+    # Newer variants use transcript.json / transcript_full.jsonl instead
+    # of overview.txt.  Try them as a fallback for both title and count.
+    if not title or count == 0:
+        for candidate in _TRANSCRIPT_CANDIDATES:
+            tpath = brain / candidate
+            if not tpath.is_file():
+                continue
+            try:
+                with tpath.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(record, dict):
+                            continue
+                        count += 1
+                        ts = record.get("timestamp")
+                        if isinstance(ts, str):
+                            latest_ts = ts
+                        if not title and record.get("source") == "USER_EXPLICIT" \
+                                and record.get("type") == "USER_INPUT":
+                            raw_content = record.get("content", "")
+                            if isinstance(raw_content, str) and raw_content:
+                                match = _USER_REQUEST_RE.search(raw_content)
+                                if match:
+                                    title = match.group(1)
+                                else:
+                                    title = raw_content
+            except OSError:
+                continue
+            break  # first existing transcript wins
+
+    if not title:
+        # No titleable content and no transcript — treat the brain as
+        # empty rather than fabricating a record.
+        if count == 0:
+            return None
+        title = "Untitled"
+
+    timestamp = _parse_iso_timestamp(latest_ts or "") if latest_ts else None
+    if timestamp is None:
+        try:
+            timestamp = datetime.fromtimestamp(
+                brain.stat().st_mtime, tz=timezone.utc
+            )
+        except OSError:
+            return None
+
+    return Session(
+        uuid=os.path.basename(brain.rstrip("/")),
+        agent=AgentName.ANTIGRAVITY,
+        title=_normalise_title(title),
+        date=timestamp,
+        path=str(brain),
+        message_count=count,
+    )
+
+
+def _is_valid_uuid(uuid: str) -> bool:
+    if not uuid or not isinstance(uuid, str):
+        return False
+    stripped = uuid.strip()
+    if not stripped or stripped != uuid:
+        return False
+    if any(c.isspace() for c in stripped) or "/" in stripped or "\\" in stripped:
+        return False
+    return True
+
+
+def list_sessions(base_dir: Optional[str] = None) -> List[Session]:
+    """Return every Antigravity brain directory under the search roots."""
+    sessions: List[Session] = []
+    for root in _resolve_brain_roots(base_dir):
+        for brain in sorted(root.iterdir(), key=lambda p: p.name):
+            if not brain.is_dir():
+                continue
+            session = _scan_brain(brain)
+            if session is not None:
+                sessions.append(session)
+    sessions.sort(key=lambda s: s.date, reverse=True)
+    return sessions
+
+
+def _find_brain(uuid: str, base_dir: Optional[str]) -> Path:
+    if not _is_valid_uuid(uuid):
+        raise ValueError(f"Invalid Antigravity session uuid: {uuid!r}")
+    for root in _resolve_brain_roots(base_dir):
+        candidate = root / uuid
+        if candidate.is_dir():
+            return candidate
+    raise FileNotFoundError(f"Antigravity session {uuid!r} not found")
+
+
+def read_session(uuid: str, base_dir: Optional[str] = None) -> Session:
+    """Read a single Antigravity session by ``uuid`` (brain directory name)."""
+    brain = _find_brain(uuid, base_dir)
+    session = _scan_brain(brain)
+    if session is None:
+        raise FileNotFoundError(
+            f"Antigravity session {uuid!r} at {brain} yielded no parseable data"
+        )
+    return session
+
+
+def search(query: str, base_dir: Optional[str] = None) -> List[Session]:
+    """Case-insensitive substring search across Antigravity session titles."""
+    needle = (query or "").strip().lower()
+    if not needle:
+        return []
+    return [
+        session
+        for session in list_sessions(base_dir)
+        if needle in session.title.lower()
+    ]
+
+
+def session_exists(uuid: str, base_dir: Optional[str] = None) -> bool:
+    if not _is_valid_uuid(uuid):
+        return False
+    try:
+        _find_brain(uuid, base_dir)
+    except (FileNotFoundError, ValueError):
+        return False
+    return True
