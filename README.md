@@ -78,6 +78,10 @@ That's it. The installer:
 └──────────────────────────────────────────────────────────────┘
 ```
 
+## Design boundaries
+
+`ai-reader` (this library) stays separate from the `~/.agents` skills monorepo — the GitHub `pro-target` org groups them; no merge. The public API grows first (message + tool-call access); migration of consumers off the legacy wrapper scripts is deferred until the library reaches feature parity.
+
 ## Usage
 
 ### As an MCP server (recommended)
@@ -113,10 +117,6 @@ print(session.message_count)
 ```
 
 See [docs/architecture.md](./docs/architecture.md) for the full layering.
-
-## Backward Compatibility
-
-If you use the legacy `~/.agents/skills/ai-local-reader/scripts/{get_latest_context.py,agent-audit.py}` — they continue to work as thin wrappers around the new `ai-reader` CLI. See [docs/migration.md](./docs/migration.md).
 
 ## Development
 

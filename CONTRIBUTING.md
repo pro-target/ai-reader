@@ -9,8 +9,7 @@ fastest path from idea to merge is:
 2. **Fork and branch.** Branch names: `feat/<short-name>`,
    `fix/<short-name>`, `docs/<short-name>`.
 3. **Write the change + tests.** New parsers need unit tests with
-   fixtures under `tests/fixtures/`. New detectors need a Protocol
-   conformance test.
+   fixtures under `tests/fixtures/`.
 4. **Run the full test suite + linters locally:**
    ```bash
    pip install -e ".[dev]"
@@ -40,12 +39,6 @@ See [docs/parsers.md](./docs/parsers.md). Summary:
    `read_session`, `search`, `session_exists`.
 3. Re-export the module from `src/ai_reader/parsers/__init__.py`.
 4. Add a `tests/test_parsers/test_<agent>.py` with fixtures.
-
-## Adding a custom detector
-
-See [docs/access-control.md](./docs/access-control.md). Summary: any
-object with `is_subagent() -> bool` and `name() -> str` plugs into
-`AccessGuard(detector=...)`.
 
 ## Reporting a security issue
 

@@ -2,8 +2,7 @@
 
 This file is the canonical domain glossary for `ai-reader`. Other agents
 working in this codebase (Claude Code, Codex, OpenCode, Antigravity,
-Roo, Gemini, etc.) should use these terms consistently. See
-[`~/.agents/INDEX.md`](../../INDEX.md) for the cross-agent rule set.
+Roo, Gemini, etc.) should use these terms consistently.
 
 ## What ai-reader is
 
@@ -11,7 +10,7 @@ Roo, Gemini, etc.) should use these terms consistently. See
 on-disk conversation logs produced by Claude, Codex, OpenCode, and
 Antigravity and exposes them through three surfaces — a CLI, an MCP
 server, and a Python parser package. Any caller can read any session;
-there is no access layer in front of the parsers.
+there is no access layer in front of the parsers. See Design boundaries in README.
 
 ## Glossary
 
@@ -41,11 +40,9 @@ Any base directory can be overridden by setting `AI_READER_HOME`.
 |---|---|
 | "How is a Claude session parsed?" | [`src/ai_reader/parsers/claude.py`](./src/ai_reader/parsers/claude.py) |
 | "How do I add a new agent?" | [`docs/parsers.md`](./docs/parsers.md) |
-| "How do I migrate from `ai-local-reader`?" | [`docs/migration.md`](./docs/migration.md) |
 | "What's the layering?" | [`docs/architecture.md`](./docs/architecture.md) |
 
 ## Cross-references
 
-- Project rule: [~/.agents/INDEX.md](../../INDEX.md) — global agent rules
 - This project's canonical docs: [README.md](./README.md), [CHANGELOG.md](./CHANGELOG.md)
 - Open issues: <https://github.com/pro-target/ai-reader/issues>
