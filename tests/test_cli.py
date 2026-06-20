@@ -115,6 +115,18 @@ def test_cli_version() -> None:
     assert "0.1.0" in p.stdout
 
 
+def test_module_invocation() -> None:
+    """``python -m ai_reader --version`` exits 0 (module entry point works)."""
+    p = subprocess.run(
+        [sys.executable, "-m", "ai_reader", "--version"],
+        capture_output=True,
+        text=True,
+        timeout=30.0,
+    )
+    assert p.returncode == 0, p.stderr
+    assert "ai-reader" in p.stdout
+
+
 def test_cli_help() -> None:
     p = _run_cli("--help")
     assert p.returncode == 0, p.stderr
