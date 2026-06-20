@@ -71,6 +71,7 @@ def tmp_sessions_dir(tmp_path: Path) -> Path:
     (home / ".codex" / "sessions").mkdir(parents=True)
     (home / ".gemini" / "antigravity" / "brain").mkdir(parents=True)
     (home / ".gemini" / "antigravity-cli" / "brain").mkdir(parents=True)
+    (home / ".pi" / "agent" / "sessions").mkdir(parents=True)
     return home
 
 
@@ -144,6 +145,73 @@ def fake_codex_session(tmp_sessions_dir: Path) -> Path:
                     "role": "assistant",
                     "content": [{"type": "output_text", "text": "Done."}],
                 },
+            },
+        ],
+    )
+    return jsonl
+
+
+@pytest.fixture
+def fake_pi_session(tmp_sessions_dir: Path) -> Path:
+    """A single Pi JSONL session inside the fake sessions tree."""
+    uuid = "test-pi-1"
+    jsonl = (
+        tmp_sessions_dir
+        / ".pi"
+        / "agent"
+        / "sessions"
+        / "--tmp-work--"
+        / f"2026-06-14T10-00-00-000Z_{uuid}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "session",
+                "version": 3,
+                "id": uuid,
+                "timestamp": "2026-06-14T10:00:00.000Z",
+                "cwd": "/tmp/work",
+            },
+            {
+                "type": "model_change",
+                "id": "model-1",
+                "parentId": None,
+                "timestamp": "2026-06-14T10:00:00.001Z",
+                "provider": "openai-codex",
+                "modelId": "gpt-test",
+            },
+            {
+                "type": "message",
+                "id": "user-1",
+                "parentId": "model-1",
+                "timestamp": "2026-06-14T10:00:02.000Z",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Add Pi support"}],
+                    "timestamp": 1_718_360_002_000,
+                },
+            },
+            {
+                "type": "message",
+                "id": "assistant-1",
+                "parentId": "user-1",
+                "timestamp": "2026-06-14T10:00:04.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "hidden"},
+                        {"type": "text", "text": "Done."},
+                    ],
+                    "timestamp": 1_718_360_004_000,
+                },
+            },
+            {
+                "type": "message",
+                "id": "tool-1",
+                "parentId": "assistant-1",
+                "timestamp": "2026-06-14T10:00:05.000Z",
+                "message": {"role": "toolResult", "content": "ignored"},
             },
         ],
     )
@@ -231,6 +299,7 @@ def fake_antigravity_brain(tmp_sessions_dir: Path) -> Path:
 _REAL_CLAUDE_DIR = Path("~/.claude/projects").expanduser()
 _REAL_CODEX_DIR = Path("~/.codex/sessions").expanduser()
 _REAL_OPENCODE_DB = Path("~/.local/share/opencode/opencode.db")
+_REAL_PI_DIR = Path("~/.pi/agent/sessions").expanduser()
 _REAL_ANTIGRAVITY_DIRS: List[Path] = [
     Path("~/.gemini/antigravity/brain").expanduser(),
     Path("~/.gemini/antigravity-cli/brain").expanduser(),
@@ -250,6 +319,11 @@ def real_codex_dir() -> Path | None:
 @pytest.fixture(scope="session")
 def real_opencode_db() -> Path | None:
     return _REAL_OPENCODE_DB if _REAL_OPENCODE_DB.is_file() else None
+
+
+@pytest.fixture(scope="session")
+def real_pi_dir() -> Path | None:
+    return _REAL_PI_DIR if _REAL_PI_DIR.is_dir() else None
 
 
 @pytest.fixture(scope="session")

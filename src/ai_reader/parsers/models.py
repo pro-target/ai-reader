@@ -25,6 +25,7 @@ class AgentName(str, Enum):
     CODEX = "CODEX"
     OPENCODE = "OPENCODE"
     ANTIGRAVITY = "ANTIGRAVITY"
+    PI = "PI"
 
 
 @dataclass(frozen=True)
@@ -36,7 +37,8 @@ class Session:
             ``<session-uuid>`` portion of the JSONL filename; for Codex
             this is the ``payload.id`` from ``session_meta``; for
             OpenCode this is the ``session.id`` primary key; for
-            Antigravity this is the brain directory name.
+            Antigravity this is the brain directory name; for Pi this
+            is the ``session.id`` header field.
         agent: Which agent owns the session.
         title: Human-readable title, truncated to 100 characters and
             with newlines collapsed to spaces.
@@ -50,7 +52,8 @@ class Session:
             Codex this is the number of ``user``/``assistant`` records
             read; for OpenCode this is ``SELECT COUNT(*) FROM message``;
             for Antigravity this is the number of records in the
-            overview.txt / transcript.jsonl.
+            overview.txt / transcript.jsonl; for Pi this is the number
+            of user/assistant message entries.
         parent_uuid: For OpenCode sub-sessions (``session.parent_id``).
             ``None`` for top-level sessions and for other agents.
         extra: Free-form metadata bag (project slug for Claude, cwd

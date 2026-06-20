@@ -19,6 +19,7 @@ responsibility and depends only on the layer below it.
 │   • codex.py      — JSONL                                    │
 │   • opencode.py   — SQLite (with snap/flatpak detection)     │
 │   • antigravity.py — brain directory                         │
+│   • pi.py          — JSONL session tree                      │
 │                                                              │
 │   Shared schema: Session, AgentName                          │
 └──────────────────────────────────────────────────────────────┘
@@ -75,6 +76,7 @@ Path resolution per agent:
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-<uuid>.jsonl` |
 | OpenCode | `~/.local/share/opencode/opencode.db` (or snap variants) |
 | Antigravity | `~/.gemini/antigravity/brain/<uuid>/` |
+| Pi | `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl` |
 
 The `Session` model is shared; see
 [`src/ai_reader/parsers/models.py`](../src/ai_reader/parsers/models.py).

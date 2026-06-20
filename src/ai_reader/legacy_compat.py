@@ -49,6 +49,7 @@ _LEGACY_AGENT_TO_AI_READER = {
     "CLAUDE": "claude",
     "CODEX": "codex",
     "OPENCODE": "opencode",
+    "PI": "pi",
     "ANTIGRAVITY": "antigravity",
     "ANTIGRAVITY_CLI": "antigravity",
     "ANTIGRAVITY_IDE": "antigravity",

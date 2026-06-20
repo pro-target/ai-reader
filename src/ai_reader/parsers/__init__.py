@@ -1,4 +1,4 @@
-"""Session parsers for Claude, Codex, OpenCode, and Antigravity.
+"""Session parsers for Claude, Codex, OpenCode, Antigravity, and Pi.
 
 Each parser module exports the same four-function interface:
 
@@ -29,9 +29,10 @@ Modules:
     antigravity:  brain directories under
                   ``~/.gemini/antigravity/brain`` and
                   ``~/.gemini/antigravity-cli/brain``.
+    pi:           ``~/.pi/agent/sessions/<encoded-cwd>/*.jsonl``.
 """
 
-from . import antigravity, claude, codex, opencode
+from . import antigravity, claude, codex, opencode, pi
 from .models import AgentName, Session
 
 __all__ = [
@@ -41,4 +42,5 @@ __all__ = [
     "claude",
     "codex",
     "opencode",
+    "pi",
 ]

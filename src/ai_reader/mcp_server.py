@@ -29,7 +29,7 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from ai_reader import __version__  # noqa: E402
 from ai_reader.parsers import AgentName, Session  # noqa: E402
-from ai_reader.parsers import antigravity, claude, codex, opencode  # noqa: E402
+from ai_reader.parsers import antigravity, claude, codex, opencode, pi  # noqa: E402
 
 __all__ = ["mcp", "main"]
 
@@ -39,6 +39,7 @@ _PARSERS = {
     AgentName.CODEX: codex,
     AgentName.OPENCODE: opencode,
     AgentName.ANTIGRAVITY: antigravity,
+    AgentName.PI: pi,
 }
 
 
@@ -47,6 +48,7 @@ _AGENT_NAMES_LOWER: dict[str, AgentName] = {
     "codex": AgentName.CODEX,
     "opencode": AgentName.OPENCODE,
     "antigravity": AgentName.ANTIGRAVITY,
+    "pi": AgentName.PI,
 }
 
 
@@ -56,7 +58,7 @@ _MESSAGES_CAP = 100
 mcp = FastMCP(
     name="ai-reader",
     instructions=(
-        "ai-reader: read Claude, Codex, OpenCode and Antigravity session "
+        "ai-reader: read Claude, Codex, OpenCode, Antigravity and Pi session "
         f"files. Server version: {__version__}."
     ),
 )
@@ -199,12 +201,66 @@ def _codex_text(parts: object) -> str:
     return "\n".join(chunks)
 
 
+def _pi_text(parts: object) -> str:
+    """Concatenate Pi text parts, skipping thinking/tool-call blocks."""
+    if isinstance(parts, str):
+        return parts
+    if not isinstance(parts, list):
+        return ""
+    chunks: List[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type", "") not in ("text", "input_text", "output_text", ""):
+            continue
+        text = part.get("text", "")
+        if isinstance(text, str) and text:
+            chunks.append(text)
+    return "\n".join(chunks)
+
+
+def _extract_messages_pi(path: str) -> List[dict[str, Any]]:
+    """Return up to :data:`_MESSAGES_CAP` user/assistant records from a Pi JSONL."""
+    messages: List[dict[str, Any]] = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if len(messages) >= _MESSAGES_CAP:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict) or record.get("type") != "message":
+                    continue
+                payload = record.get("message") or {}
+                if not isinstance(payload, dict):
+                    continue
+                role = payload.get("role")
+                if role not in ("user", "assistant"):
+                    continue
+                messages.append(
+                    {
+                        "role": role,
+                        "content": _pi_text(payload.get("content", "")),
+                    }
+                )
+    except OSError:
+        return messages
+    return messages
+
+
 def _extract_messages(session: Session) -> List[dict[str, Any]]:
     """Best-effort message extraction; capped at :data:`_MESSAGES_CAP`."""
     if session.agent == AgentName.CLAUDE:
         return _extract_messages_claude(session.path)
     if session.agent == AgentName.CODEX:
         return _extract_messages_codex(session.path)
+    if session.agent == AgentName.PI:
+        return _extract_messages_pi(session.path)
     return []
 
 
@@ -213,8 +269,8 @@ def list_sessions(agent: Optional[str] = None) -> List[dict[str, Any]]:
     """List discoverable sessions, optionally filtered by ``agent``.
 
     Args:
-        agent: One of ``claude``, ``codex``, ``opencode``, ``antigravity``.
-            When omitted, every supported agent is queried.
+        agent: One of ``claude``, ``codex``, ``opencode``, ``antigravity``,
+            ``pi``. When omitted, every supported agent is queried.
 
     Returns:
         A list of session summaries.
@@ -238,7 +294,7 @@ def read_session(uuid: str, agent: str) -> dict[str, Any]:
 
     Args:
         uuid: Session identifier.
-        agent: One of ``claude``, ``codex``, ``opencode``, ``antigravity``.
+        agent: One of ``claude``, ``codex``, ``opencode``, ``antigravity``, ``pi``.
 
     Returns:
         A dict with session metadata and a ``messages`` list (capped at
@@ -274,7 +330,7 @@ def search_sessions(query: str, agent: Optional[str] = None) -> List[dict[str, A
     Args:
         query: Non-empty search string.
         agent: Optional agent filter; one of ``claude``, ``codex``,
-            ``opencode``, ``antigravity``.
+            ``opencode``, ``antigravity``, ``pi``.
 
     Returns:
         A list of matching session summaries.  An empty list means

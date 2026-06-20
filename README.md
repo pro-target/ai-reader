@@ -4,18 +4,40 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
-> Read Claude, Codex, OpenCode, and Antigravity sessions through a single MCP server, CLI, or Python package.
+> Read Claude, Codex, OpenCode, Antigravity, and Pi sessions through a single MCP server, CLI, or Python package.
 
 ## Why?
 
 Every AI agent stores its conversation logs on disk in a different
 place and format — JSONL for Claude and Codex, SQLite for OpenCode,
-brain directories for Antigravity. `ai-reader` gives you one read-only
+brain directories for Antigravity, project JSONL files for Pi. `ai-reader` gives you one read-only
 interface across all of them.
 
 `ai-reader` is a **reader**, not a guard. Any caller that can reach the
 CLI, the MCP server, or the package can read any session. There is no
 access-control layer in front of the parsers.
+
+## When it helps
+
+One reader across every agent unlocks workflows that a single-agent log
+cannot:
+
+- **Hit a provider limit? Switch agents and keep going.** Ran out of
+  Codex quota mid-task? Spin up Antigravity, point it at the Codex
+  session, and ask it to continue — same task, different model, no lost
+  context.
+- **Ran out of context window? Start fresh and resume.** Begin a new
+  session, hand it the previous session's UUID, and say "continue from
+  here." The prior transcript is readable regardless of which agent
+  wrote it.
+- **Need a session audit? Dispatch a reviewer.** Send an agent to read
+  any past session and check it against your bar: solution logic (could
+  it be better?), security, completeness (did it actually cover *every*
+  requirement, not just the loud ones?), component boundaries / DRY,
+  and whatever else your team cares about.
+- **Cross-agent handoff & triage.** "What did the other agent do on
+  this?" works across Claude, Codex, OpenCode, Antigravity, and Pi
+  without learning five different log layouts.
 
 ## Quick Start (1 request)
 
@@ -38,6 +60,7 @@ That's it. The installer:
 | Codex | `~/.codex/sessions/` | JSONL |
 | OpenCode | `~/.local/share/opencode/opencode.db` | SQLite (auto-detects snap/flatpak) |
 | Antigravity | `~/.gemini/antigravity/brain/` | JSON / markdown brain directories |
+| Pi | `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl` | JSONL |
 
 ## Architecture
 
@@ -50,7 +73,7 @@ That's it. The installer:
 └──────────────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────┐
 │ Layer 2: Core (parsers/, models)                             │
-│   • claude, codex, opencode (SQLite), antigravity            │
+│   • claude, codex, opencode (SQLite), antigravity, pi        │
 │   • Auto-detect snap/flatpak OpenCode DBs                    │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -70,8 +93,8 @@ The MCP server is auto-registered in your agent's config. Tools available:
 ### As a CLI (testing / scripts)
 
 ```bash
-ai-reader list --agent claude
-ai-reader read --agent claude --uuid <session-uuid>
+ai-reader list --agent pi
+ai-reader read --agent pi <session-uuid>
 ai-reader search "refactor"
 ```
 

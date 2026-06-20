@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ai-reader"
 version = "0.1.0"
-description = "Multi-agent session reader (Claude, Codex, OpenCode, Antigravity) with MCP server"
+description = "Multi-agent session reader (Claude, Codex, OpenCode, Antigravity, Pi) with MCP server"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"

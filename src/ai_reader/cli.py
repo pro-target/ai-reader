@@ -2,7 +2,7 @@
 
 Thin command-line wrapper over the same parsers the MCP server
 exposes: list, read, and search sessions for Claude, Codex,
-OpenCode, and Antigravity.
+OpenCode, Antigravity, and Pi.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ if str(_SRC) not in sys.path:
 
 from ai_reader import __version__  # noqa: E402
 from ai_reader.parsers import AgentName, Session  # noqa: E402
-from ai_reader.parsers import antigravity, claude, codex, opencode  # noqa: E402
+from ai_reader.parsers import antigravity, claude, codex, opencode, pi  # noqa: E402
 
 __all__ = ["main", "build_parser"]
 
@@ -31,6 +31,7 @@ _PARSERS = {
     AgentName.CODEX: codex,
     AgentName.OPENCODE: opencode,
     AgentName.ANTIGRAVITY: antigravity,
+    AgentName.PI: pi,
 }
 
 
@@ -241,7 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ai-reader",
         description=(
-            "Inspect Claude, Codex, OpenCode and Antigravity sessions."
+            "Inspect Claude, Codex, OpenCode, Antigravity and Pi sessions."
         ),
     )
     parser.add_argument(

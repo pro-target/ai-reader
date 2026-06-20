@@ -29,7 +29,9 @@ from ai_reader.mcp_server import (
     _extract_messages,
     _extract_messages_claude,
     _extract_messages_codex,
+    _extract_messages_pi,
     _iso,
+    _pi_text,
     _session_summary,
     _target_agents,
     list_sessions,
@@ -206,6 +208,7 @@ def test_coerce_agent_lowercases() -> None:
     assert _coerce_agent("CLAUDE") is AgentName.CLAUDE
     assert _coerce_agent("codex") is AgentName.CODEX
     assert _coerce_agent(" OpenCode ") is AgentName.OPENCODE
+    assert _coerce_agent("pi") is AgentName.PI
     with pytest.raises(ValueError):
         _coerce_agent("mystery")
     with pytest.raises(ValueError):
@@ -347,6 +350,53 @@ def test_codex_text_variants() -> None:
     assert _codex_text([]) == ""
 
 
+# --- _extract_messages_pi ---------------------------------------------------
+
+
+def test_extract_messages_pi_basic(tmp_path: Path) -> None:
+    p = tmp_path / "session.jsonl"
+    p.write_text(
+        '{"type":"session","id":"x"}\n'
+        '{"type":"message","message":{"role":"user",'
+        '"content":[{"type":"text","text":"hi"}]}}\n'
+        '{"type":"message","message":{"role":"assistant",'
+        '"content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"hello"}]}}\n'
+        '{"type":"message","message":{"role":"toolResult","content":"ignored"}}\n',
+        encoding="utf-8",
+    )
+    msgs = _extract_messages_pi(str(p))
+    assert len(msgs) == 2
+    assert msgs[0] == {"role": "user", "content": "hi"}
+    assert msgs[1] == {"role": "assistant", "content": "hello"}
+
+
+def test_extract_messages_pi_handles_malformed(tmp_path: Path) -> None:
+    p = tmp_path / "session.jsonl"
+    p.write_text(
+        "garbage\n"
+        '{"type":"message","message":{"role":"user",'
+        '"content":[{"type":"text","text":"real"}]}}\n',
+        encoding="utf-8",
+    )
+    msgs = _extract_messages_pi(str(p))
+    assert len(msgs) == 1
+    assert msgs[0]["content"] == "real"
+
+
+def test_extract_messages_pi_empty_file(tmp_path: Path) -> None:
+    p = tmp_path / "session.jsonl"
+    p.write_text("", encoding="utf-8")
+    assert _extract_messages_pi(str(p)) == []
+
+
+def test_pi_text_variants() -> None:
+    assert _pi_text([{"type": "text", "text": "a"}]) == "a"
+    assert _pi_text([{"type": "thinking", "thinking": "ignored"}]) == ""
+    assert _pi_text([{"text": "no-type"}]) == "no-type"
+    assert _pi_text("just a string") == "just a string"
+    assert _pi_text(None) == ""  # type: ignore[arg-type]
+
+
 # --- _extract_messages dispatcher ------------------------------------------
 
 
@@ -377,6 +427,21 @@ def test_extract_messages_dispatches_to_codex(tmp_path: Path) -> None:
         path=str(p), message_count=1,
     )
     assert _extract_messages(s)[0]["content"] == "z"
+
+
+def test_extract_messages_dispatches_to_pi(tmp_path: Path) -> None:
+    from ai_reader.parsers.models import Session
+    p = tmp_path / "x.jsonl"
+    p.write_text(
+        '{"type":"message","message":{"role":"user",'
+        '"content":[{"type":"text","text":"p"}]}}\n',
+        encoding="utf-8",
+    )
+    s = Session(
+        uuid="u", agent=AgentName.PI, title="t", date=datetime.now(tz=timezone.utc),
+        path=str(p), message_count=1,
+    )
+    assert _extract_messages(s)[0]["content"] == "p"
 
 
 def test_extract_messages_unsupported_agent(tmp_path: Path) -> None:
