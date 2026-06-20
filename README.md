@@ -1,22 +1,26 @@
 # ai-reader
 
-[![CI](https://github.com/anomalyco/ai-reader/workflows/CI/badge.svg)](https://github.com/anomalyco/ai-reader/actions)
-[![Coverage](https://codecov.io/gh/anomalyco/ai-reader/branch/main/graph/badge.svg)](https://codecov.io/gh/anomalyco/ai-reader)
+[![CI](https://github.com/pro-target/ai-reader/workflows/CI/badge.svg)](https://github.com/pro-target/ai-reader/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
-> Read Claude, Codex, OpenCode, and Antigravity sessions via a single MCP server — with sub-agent access guard.
+> Read Claude, Codex, OpenCode, and Antigravity sessions through a single MCP server, CLI, or Python package.
 
 ## Why?
 
-When you run multiple AI agents on the same machine, **parent agents can read each other's session files** via `Read` or `Bash cat`. This violates the **Multi-Agent Awareness** rule (see [CONTEXT.md](./CONTEXT.md)).
+Every AI agent stores its conversation logs on disk in a different
+place and format — JSONL for Claude and Codex, SQLite for OpenCode,
+brain directories for Antigravity. `ai-reader` gives you one read-only
+interface across all of them.
 
-**ai-reader** solves this by exposing sessions only through a guarded MCP server. **Only sub-agents** (processes that look like they were spawned by an agent) can read sessions. Parents are denied.
+`ai-reader` is a **reader**, not a guard. Any caller that can reach the
+CLI, the MCP server, or the package can read any session. There is no
+access-control layer in front of the parsers.
 
 ## Quick Start (1 request)
 
 ```bash
-git clone https://github.com/anomalyco/ai-reader.git ~/dev/ai-reader
+git clone https://github.com/pro-target/ai-reader.git ~/dev/ai-reader
 cd ~/dev/ai-reader && bash install.sh
 ```
 
@@ -42,19 +46,12 @@ That's it. The installer:
 │ Layer 1: Public API (3 surfaces)                             │
 │   • ai-reader CLI (argparse)                                 │
 │   • ai-reader-mcp (MCP server, stdio JSON-RPC)               │
-│   • from ai_reader import AccessGuard  (Python SDK)          │
+│   • from ai_reader.parsers import ...  (Python SDK)          │
 └──────────────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────┐
 │ Layer 2: Core (parsers/, models)                             │
 │   • claude, codex, opencode (SQLite), antigravity            │
 │   • Auto-detect snap/flatpak OpenCode DBs                    │
-└──────────────────────────────────────────────────────────────┘
-┌──────────────────────────────────────────────────────────────┐
-│ Layer 3: Access Control (access/)                            │
-│   • EnvDetector (CLAUDE_CODE_SUBAGENT, CODEX_*, OPENCODE_*)  │
-│   • ProcDetector (/proc/<ppid>/cmdline walker, Linux)        │
-│   • CompositeDetector (env OR proc)                          │
-│   • AccessGuard.require() → PermissionError on parent       │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -70,19 +67,12 @@ The MCP server is auto-registered in your agent's config. Tools available:
 | `read_session(uuid, agent)` | Read one session; returns up to 100 messages. |
 | `search_sessions(query, agent?)` | Case-insensitive title substring search. |
 
-All three are guarded by `AccessGuard`. Parents receive a structured `permission_denied` error.
-
 ### As a CLI (testing / scripts)
 
 ```bash
-# Parent process — denied:
 ai-reader list --agent claude
-# ai-reader: permission denied: access denied for session '*' ...
-
-# Sub-agent (env set):
-CLAUDE_CODE_SUBAGENT=1 ai-reader list --agent claude
-CLAUDE_CODE_SUBAGENT=1 ai-reader read --agent claude --uuid <session-uuid>
-CLAUDE_CODE_SUBAGENT=1 ai-reader search "session-access-guard"
+ai-reader read --agent claude --uuid <session-uuid>
+ai-reader search "refactor"
 ```
 
 Add `--json` to any subcommand for machine-readable output.
@@ -90,39 +80,31 @@ Add `--json` to any subcommand for machine-readable output.
 ### As a Python SDK
 
 ```python
-from ai_reader.access import AccessGuard, AccessRequest
-from ai_reader.parsers import AgentName
+from ai_reader.parsers import AgentName, claude
 
-guard = AccessGuard()
-result = guard.check(AccessRequest(
-    session_uuid="...",
-    agent=AgentName.CLAUDE,
-    operation="read",
-))
-if result.allowed:
-    session = guard.read_session(uuid, AgentName.CLAUDE)
+for session in claude.list_sessions():
+    print(session.uuid, session.title)
+
+session = claude.read_session("<session-uuid>")
+print(session.message_count)
 ```
 
-See [docs/architecture.md](./docs/architecture.md) for the full layering and [docs/access-control.md](./docs/access-control.md) for writing custom detectors.
+See [docs/architecture.md](./docs/architecture.md) for the full layering.
 
 ## Backward Compatibility
 
 If you use the legacy `~/.agents/skills/ai-local-reader/scripts/{get_latest_context.py,agent-audit.py}` — they continue to work as thin wrappers around the new `ai-reader` CLI. See [docs/migration.md](./docs/migration.md).
 
-## Multi-Agent Awareness
-
-This project enforces the [Multi-Agent Awareness](./CONTEXT.md#multi-agent-awareness) rule: parents cannot read sub-agent sessions directly, sub-agents can read any session.
-
 ## Development
 
 ```bash
-git clone https://github.com/anomalyco/ai-reader.git
+git clone https://github.com/pro-target/ai-reader.git
 cd ai-reader
 pip install -e ".[dev]"
 pytest --cov=src/ai_reader
 ```
 
-- 184 tests, ≥80% coverage required by CI
+- 140 tests, ≥80% coverage required by CI
 - Conventional Commits (`feat:`, `fix:`, `docs:`, …)
 - See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/parsers.md](./docs/parsers.md) for adding new agents
 

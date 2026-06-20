@@ -224,37 +224,6 @@ def fake_antigravity_brain(tmp_sessions_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Subagent environment helpers
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def subagent_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Set the canonical Claude subagent marker so the guard allows access."""
-    monkeypatch.setenv("CLAUDE_CODE_SUBAGENT", "1")
-    # Wipe other agent markers to keep tests deterministic.
-    for var in (
-        "CODEX_SUBAGENT_TASK_ID",
-        "OPENCODE_PARENT_ID",
-        "GEMINI_SUBAGENT",
-    ):
-        monkeypatch.delenv(var, raising=False)
-
-
-@pytest.fixture
-def parent_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure *no* subagent marker is visible to the guard."""
-    for var in (
-        "CLAUDE_CODE_SUBAGENT",
-        "CLAUDE_CODE_FORK_SUBAGENT",
-        "CODEX_SUBAGENT_TASK_ID",
-        "OPENCODE_PARENT_ID",
-        "GEMINI_SUBAGENT",
-    ):
-        monkeypatch.delenv(var, raising=False)
-
-
-# ---------------------------------------------------------------------------
 # Real-data probes (read-only, used by integration-style tests)
 # ---------------------------------------------------------------------------
 

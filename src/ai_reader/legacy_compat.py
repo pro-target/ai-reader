@@ -8,15 +8,12 @@ want to break the public surface of those scripts — operators have
 dashes, READMEs and muscle memory pointed at them.
 
 This module is the thin compatibility layer that lets the legacy
-scripts prefer the new ``ai-reader`` CLI when both:
+scripts prefer the new ``ai-reader`` CLI when:
 
 1. ``ai-reader`` is installed (``shutil.which`` returns non-None), and
-2. The current process is recognised as a *sub-agent* by
-   :class:`ai_reader.access.detector.EnvDetector` (parents should
-   continue to use the legacy code path that has no access guard).
+2. The requested flag set is something ``ai-reader`` can express.
 
-If either condition fails, or the requested flag set is not something
-``ai-reader`` can express, the wrappers return ``None`` and the caller
+If either condition fails, the wrappers return ``None`` and the caller
 falls through to the original 2649 lines of legacy code.
 
 The wrappers never raise — a broken shim must never break the legacy
@@ -38,7 +35,6 @@ __all__ = [
     "run_legacy_get_latest_context",
     "run_legacy_agent_audit",
     "is_ai_reader_available",
-    "is_caller_subagent",
 ]
 
 
@@ -71,24 +67,6 @@ _AI_READER_READ_FLAGS = {"--agent", "--json"}
 def is_ai_reader_available() -> bool:
     """Return True if the ``ai-reader`` executable is on PATH."""
     return shutil.which(_AI_READER_BIN) is not None
-
-
-def is_caller_subagent() -> bool:
-    """Best-effort sub-agent detection.
-
-    Delegates to :class:`EnvDetector` from ``ai_reader.access``.  We
-    intentionally avoid instantiating the full :class:`AccessGuard`
-    here — we only need a yes/no answer, and importing the guard
-    drags in parser modules we may not need.
-    """
-    try:
-        from ai_reader.access.detector import EnvDetector
-    except Exception:
-        return False
-    try:
-        return EnvDetector().is_subagent()
-    except Exception:
-        return False
 
 
 def _run_ai_reader(args: Sequence[str]) -> int:
@@ -157,8 +135,6 @@ def run_legacy_get_latest_context() -> Optional[int]:
     * ``--fuzzy`` (partial UUID match — ai-reader has no equivalent)
     """
     if not is_ai_reader_available():
-        return None
-    if not is_caller_subagent():
         return None
 
     flags = _parse_simple_flags(sys.argv[1:])
@@ -238,8 +214,6 @@ def run_legacy_agent_audit() -> Optional[int]:
     smoke tests, and fall back for everything else.
     """
     if not is_ai_reader_available():
-        return None
-    if not is_caller_subagent():
         return None
 
     flags = _parse_simple_flags(sys.argv[1:])

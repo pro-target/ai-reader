@@ -6,7 +6,7 @@ patches the four agent configs (Claude, Codex, OpenCode, Antigravity) in place.
 ## Quick start
 
 ```bash
-git clone https://github.com/anomalyco/ai-reader.git ~/dev/ai-reader
+git clone https://github.com/pro-target/ai-reader.git ~/dev/ai-reader
 cd ~/dev/ai-reader
 bash install.sh
 ```

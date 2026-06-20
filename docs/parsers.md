@@ -161,8 +161,6 @@ _PARSERS = {
 `src/ai_reader/mcp_server.py`: same change in its `_PARSERS` dict
 and the `_AGENT_NAMES_LOWER` map.
 
-`src/ai_reader/access/guard.py`: same change in its `_PARSERS` map.
-
 ## Step 5 — tests
 
 Create `tests/test_parsers/test_gemini_cli.py`:
@@ -241,6 +239,6 @@ Use the existing `tests/conftest.py` helpers if it provides
 - [ ] Tests cover: happy path, missing root, missing uuid, search
 - [ ] Title truncated to 100 chars, newlines collapsed
 - [ ] `AgentName` extended; `parsers/__init__.py` updated
-- [ ] `cli.py`, `mcp_server.py`, `guard.py` `_PARSERS` updated
+- [ ] `cli.py`, `mcp_server.py` `_PARSERS` updated
 - [ ] Coverage stays ≥ 80% (`pytest --cov`)
 - [ ] Docs (README, CONTEXT, CHANGELOG) updated

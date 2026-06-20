@@ -1,9 +1,8 @@
 """CLI entry point for ai-reader.
 
-Thin command-line wrapper over the same primitives the MCP server
-exposes.  The guard is consulted for every read, so the CLI is
-mostly useful for sub-agent runtimes that need a quick inspection
-tool (or for tests that set the recognised env vars).
+Thin command-line wrapper over the same parsers the MCP server
+exposes: list, read, and search sessions for Claude, Codex,
+OpenCode, and Antigravity.
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from ai_reader import __version__  # noqa: E402
-from ai_reader.access import AccessGuard  # noqa: E402
 from ai_reader.parsers import AgentName, Session  # noqa: E402
 from ai_reader.parsers import antigravity, claude, codex, opencode  # noqa: E402
 
@@ -188,11 +186,9 @@ def _run_read(args: argparse.Namespace) -> int:
     except ValueError as exc:
         return _exit_with_error(str(exc))
 
-    guard = AccessGuard()
+    parser = _PARSERS[agent_name]
     try:
-        session = guard.read_session(uuid, agent_name)
-    except PermissionError as exc:
-        return _exit_with_error(f"permission denied: {exc}", code=2)
+        session = parser.read_session(uuid)
     except FileNotFoundError as exc:
         return _exit_with_error(f"not found: {exc}", code=3)
     except ValueError as exc:
@@ -245,8 +241,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ai-reader",
         description=(
-            "Inspect Claude, Codex, OpenCode and Antigravity sessions. "
-            "Access is gated by the same sub-agent guard the MCP server uses."
+            "Inspect Claude, Codex, OpenCode and Antigravity sessions."
         ),
     )
     parser.add_argument(

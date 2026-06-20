@@ -6,8 +6,6 @@ Exposes three tools over the Model Context Protocol:
 * :func:`read_session`   — load a single session by ``uuid`` and ``agent``.
 * :func:`search_sessions` — case-insensitive title substring search.
 
-Each tool runs the :class:`~ai_reader.access.guard.AccessGuard`
-before doing any file I/O, so the caller is a recognised sub-agent.
 Errors are returned as dicts (never raised) so the MCP client can
 surface them in a structured way.
 
@@ -30,7 +28,6 @@ if str(_SRC) not in sys.path:
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from ai_reader import __version__  # noqa: E402
-from ai_reader.access import AccessGuard, AccessRequest  # noqa: E402
 from ai_reader.parsers import AgentName, Session  # noqa: E402
 from ai_reader.parsers import antigravity, claude, codex, opencode  # noqa: E402
 
@@ -54,15 +51,13 @@ _AGENT_NAMES_LOWER: dict[str, AgentName] = {
 
 
 _MESSAGES_CAP = 100
-_PLACEHOLDER_UUID = "*"
 
 
 mcp = FastMCP(
     name="ai-reader",
     instructions=(
         "ai-reader: read Claude, Codex, OpenCode and Antigravity session "
-        "files. Only sub-agents may call these tools — parent processes "
-        f"are denied. Server version: {__version__}."
+        f"files. Server version: {__version__}."
     ),
 )
 
@@ -101,25 +96,6 @@ def _target_agents(agent: Optional[str]) -> List[AgentName]:
     if agent is None or not str(agent).strip():
         return list(_PARSERS.keys())
     return [_coerce_agent(agent)]
-
-
-def _check_operation(agent: AgentName, operation: str) -> Optional[dict[str, Any]]:
-    """Run the guard with a placeholder uuid.
-
-    Returns ``None`` when access is allowed, or an error dict suitable
-    for tool return values when access is denied.
-    """
-    guard = AccessGuard()
-    request = AccessRequest(
-        session_uuid=_PLACEHOLDER_UUID,
-        agent=agent,
-        operation=operation,
-    )
-    try:
-        guard.require(request)
-    except PermissionError as exc:
-        return {"error": "permission_denied", "message": str(exc)}
-    return None
 
 
 def _extract_messages_claude(path: str) -> List[dict[str, Any]]:
@@ -241,18 +217,12 @@ def list_sessions(agent: Optional[str] = None) -> List[dict[str, Any]]:
             When omitted, every supported agent is queried.
 
     Returns:
-        A list of session summaries.  On permission denial a single
-        element ``{"error": "permission_denied", ...}`` is returned
-        (the MCP protocol prefers structured errors over exceptions).
+        A list of session summaries.
     """
     try:
         targets = _target_agents(agent)
     except ValueError as exc:
         return [{"error": "invalid_argument", "message": str(exc)}]
-
-    denial = _check_operation(targets[0], "list")
-    if denial is not None:
-        return [denial]
 
     summaries: List[dict[str, Any]] = []
     for agent_name in targets:
@@ -272,8 +242,8 @@ def read_session(uuid: str, agent: str) -> dict[str, Any]:
 
     Returns:
         A dict with session metadata and a ``messages`` list (capped at
-        100 entries) on success.  On permission denial or a missing
-        session, returns an ``error`` dict instead of raising.
+        100 entries) on success.  On a missing session, returns an
+        ``error`` dict instead of raising.
     """
     if not uuid or not str(uuid).strip():
         return {"error": "invalid_argument", "message": "uuid must be non-empty"}
@@ -282,11 +252,9 @@ def read_session(uuid: str, agent: str) -> dict[str, Any]:
     except ValueError as exc:
         return {"error": "invalid_argument", "message": str(exc)}
 
-    guard = AccessGuard()
+    parser = _PARSERS[agent_name]
     try:
-        session = guard.read_session(uuid, agent_name)
-    except PermissionError as exc:
-        return {"error": "permission_denied", "message": str(exc)}
+        session = parser.read_session(uuid)
     except FileNotFoundError:
         return {
             "error": "not_found",
@@ -310,8 +278,7 @@ def search_sessions(query: str, agent: Optional[str] = None) -> List[dict[str, A
 
     Returns:
         A list of matching session summaries.  An empty list means
-        nothing matched (or ``query`` was empty).  On permission denial
-        a single-element error dict is returned.
+        nothing matched (or ``query`` was empty).
     """
     needle = (query or "").strip()
     if not needle:
@@ -321,10 +288,6 @@ def search_sessions(query: str, agent: Optional[str] = None) -> List[dict[str, A
         targets = _target_agents(agent)
     except ValueError as exc:
         return [{"error": "invalid_argument", "message": str(exc)}]
-
-    denial = _check_operation(targets[0], "search")
-    if denial is not None:
-        return [denial]
 
     lowered = needle.lower()
     summaries: List[dict[str, Any]] = []

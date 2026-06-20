@@ -40,7 +40,6 @@ wrappers over filesystem reads. They have been replaced by:
 |---|---|
 | `from ai_local_reader.parsers.claude import list_sessions` | `from ai_reader.parsers import claude; claude.list_sessions()` |
 | `Session(uuid, agent, title, date, path, n)` | `ai_reader.parsers.models.Session` — same shape, but `message_count` instead of `n`, plus `parent_uuid` and `extra` |
-| Hand-rolled `is_subagent()` checks | `ai_reader.access.detector.EnvDetector().is_subagent()` |
 | `Read` of session files in agent code | MCP tool call: `mcp.call_tool("read_session", {"uuid": ..., "agent": ...})` |
 
 Quick port example:
@@ -83,7 +82,7 @@ uses its own parsers; the skill was the seed.
 
 ## When **not** to migrate
 
-- If your agent only does occasional session reads and you don't
-  care about the access guard, the skill is fine. Stay where you are.
-- If you need the access guard (most multi-agent setups), install
-  the package. The skill has no guard.
+- If your agent only does occasional session reads and the skill
+  scripts already do what you need, stay where you are. The package
+  adds a real MCP server and a maintained parser API; pick it up
+  when you want either.

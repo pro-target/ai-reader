@@ -5,17 +5,15 @@ the behaviour of the legacy ``get_latest_context.py`` and
 ``agent-audit.py`` scripts.  These tests pin down the rules:
 
 * If ``ai-reader`` is missing → return ``None`` (caller falls back).
-* If the caller is a parent (not a sub-agent) → return ``None``.
 * If any requested flag has no ``ai-reader`` equivalent → return ``None``.
 * Otherwise → run ``ai-reader`` and propagate its exit code.
 
-We monkey-patch ``subprocess.run`` and the detection helpers so the
+We monkey-patch ``subprocess.run`` and the availability helper so the
 tests are hermetic — no real ``ai-reader`` binary is invoked.
 """
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from typing import List
@@ -55,8 +53,12 @@ def clean_argv():
     sys.argv = original
 
 
+def _available(monkeypatch, on: bool = True) -> None:
+    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: on)
+
+
 # ---------------------------------------------------------------------------
-# Detection helpers
+# Availability helper
 # ---------------------------------------------------------------------------
 
 
@@ -68,32 +70,13 @@ def test_is_ai_reader_available_uses_path(monkeypatch):
     assert legacy_compat.is_ai_reader_available() is False
 
 
-def test_is_caller_subagent_falls_back_on_import_error(monkeypatch):
-    """If the access module can't be imported we MUST say ``False``,
-    never raise — a broken shim must not break the legacy script."""
-    monkeypatch.setattr(
-        legacy_compat,
-        "is_caller_subagent",
-        lambda: False,
-    )
-    assert legacy_compat.is_caller_subagent() is False
-
-
 # ---------------------------------------------------------------------------
 # get_latest_context
 # ---------------------------------------------------------------------------
 
 
 def test_get_latest_context_returns_none_when_ai_reader_missing(monkeypatch, clean_argv):
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: False)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: True)
-    _set_argv("--agent", "OPENCODE")
-    assert legacy_compat.run_legacy_get_latest_context() is None
-
-
-def test_get_latest_context_returns_none_for_parent(monkeypatch, clean_argv):
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: True)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: False)
+    _available(monkeypatch, on=False)
     _set_argv("--agent", "OPENCODE")
     assert legacy_compat.run_legacy_get_latest_context() is None
 
@@ -101,24 +84,21 @@ def test_get_latest_context_returns_none_for_parent(monkeypatch, clean_argv):
 def test_get_latest_context_id_without_agent_falls_back(monkeypatch, clean_argv):
     """``--id`` without ``--agent`` needs cross-source lookup that
     ``ai-reader read`` cannot do."""
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: True)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: True)
+    _available(monkeypatch)
     _set_argv("--id", "ses_abc")
     assert legacy_compat.run_legacy_get_latest_context() is None
 
 
 def test_get_latest_context_id_with_unsupported_agent_falls_back(monkeypatch, clean_argv):
     """ROO has no ``ai-reader`` equivalent → fallback."""
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: True)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: True)
+    _available(monkeypatch)
     _set_argv("--id", "ses_abc", "--agent", "ROO")
     assert legacy_compat.run_legacy_get_latest_context() is None
 
 
 def test_get_latest_context_fuzzy_falls_back(monkeypatch, clean_argv):
     """``--fuzzy`` is a legacy-only feature."""
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: True)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: True)
+    _available(monkeypatch)
     _set_argv("--id", "ses_abc", "--agent", "OPENCODE", "--fuzzy")
     assert legacy_compat.run_legacy_get_latest_context() is None
 
@@ -126,15 +106,13 @@ def test_get_latest_context_fuzzy_falls_back(monkeypatch, clean_argv):
 def test_get_latest_context_limit_falls_back(monkeypatch, clean_argv):
     """``ai-reader list`` has no ``--limit``; legacy must be used to
     honour the requested truncation."""
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: True)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: True)
+    _available(monkeypatch)
     _set_argv("--agent", "OPENCODE", "--limit", "5")
     assert legacy_compat.run_legacy_get_latest_context() is None
 
 
 def test_get_latest_context_id_with_agent_invokes_ai_reader(monkeypatch, clean_argv):
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: True)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: True)
+    _available(monkeypatch)
     calls: List[List[str]] = []
     monkeypatch.setattr(legacy_compat.subprocess, "run", _stub_run(calls, returncode=0))
     _set_argv("--id", "ses_abc", "--agent", "OPENCODE")
@@ -144,8 +122,7 @@ def test_get_latest_context_id_with_agent_invokes_ai_reader(monkeypatch, clean_a
 
 
 def test_get_latest_context_agent_only_invokes_list(monkeypatch, clean_argv):
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: True)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: True)
+    _available(monkeypatch)
     calls: List[List[str]] = []
     monkeypatch.setattr(legacy_compat.subprocess, "run", _stub_run(calls, returncode=0))
     _set_argv("--agent", "CLAUDE")
@@ -155,8 +132,7 @@ def test_get_latest_context_agent_only_invokes_list(monkeypatch, clean_argv):
 
 
 def test_get_latest_context_all_agents_invokes_list(monkeypatch, clean_argv):
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: True)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: True)
+    _available(monkeypatch)
     calls: List[List[str]] = []
     monkeypatch.setattr(legacy_compat.subprocess, "run", _stub_run(calls, returncode=0))
     _set_argv("--all-agents")
@@ -168,8 +144,7 @@ def test_get_latest_context_all_agents_invokes_list(monkeypatch, clean_argv):
 def test_get_latest_context_no_args_falls_back(monkeypatch, clean_argv):
     """No flags → legacy uses ``CURRENT_AGENT`` env var; ai-reader's
     no-flag list is a different default.  Fall back."""
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: True)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: True)
+    _available(monkeypatch)
     _set_argv()
     assert legacy_compat.run_legacy_get_latest_context() is None
 
@@ -180,8 +155,7 @@ def test_get_latest_context_no_args_falls_back(monkeypatch, clean_argv):
 
 
 def test_audit_legacy_only_flag_falls_back(monkeypatch, clean_argv):
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: True)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: True)
+    _available(monkeypatch)
     _set_argv("--agent", "OPENCODE", "--stats")
     assert legacy_compat.run_legacy_agent_audit() is None
 
@@ -189,22 +163,19 @@ def test_audit_legacy_only_flag_falls_back(monkeypatch, clean_argv):
 def test_audit_search_falls_back(monkeypatch, clean_argv):
     """``--search`` is content search in legacy, title search in
     ai-reader — different semantics, must fall back."""
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: True)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: True)
+    _available(monkeypatch)
     _set_argv("--search", "docker")
     assert legacy_compat.run_legacy_agent_audit() is None
 
 
 def test_audit_limit_falls_back(monkeypatch, clean_argv):
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: True)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: True)
+    _available(monkeypatch)
     _set_argv("--agent", "OPENCODE", "--limit", "5")
     assert legacy_compat.run_legacy_agent_audit() is None
 
 
 def test_audit_agent_only_invokes_list(monkeypatch, clean_argv):
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: True)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: True)
+    _available(monkeypatch)
     calls: List[List[str]] = []
     monkeypatch.setattr(legacy_compat.subprocess, "run", _stub_run(calls, returncode=0))
     _set_argv("--agent", "OPENCODE")
@@ -214,8 +185,7 @@ def test_audit_agent_only_invokes_list(monkeypatch, clean_argv):
 
 
 def test_audit_id_with_agent_invokes_read(monkeypatch, clean_argv):
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: True)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: True)
+    _available(monkeypatch)
     calls: List[List[str]] = []
     monkeypatch.setattr(legacy_compat.subprocess, "run", _stub_run(calls, returncode=0))
     _set_argv("--id", "ses_abc", "--agent", "OPENCODE")
@@ -225,8 +195,7 @@ def test_audit_id_with_agent_invokes_read(monkeypatch, clean_argv):
 
 
 def test_audit_no_args_invokes_list(monkeypatch, clean_argv):
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: True)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: True)
+    _available(monkeypatch)
     calls: List[List[str]] = []
     monkeypatch.setattr(legacy_compat.subprocess, "run", _stub_run(calls, returncode=0))
     _set_argv()
@@ -235,16 +204,8 @@ def test_audit_no_args_invokes_list(monkeypatch, clean_argv):
     assert calls == [["ai-reader", "list"]]
 
 
-def test_audit_returns_none_for_parent(monkeypatch, clean_argv):
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: True)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: False)
-    _set_argv()
-    assert legacy_compat.run_legacy_agent_audit() is None
-
-
 def test_audit_returns_none_when_ai_reader_missing(monkeypatch, clean_argv):
-    monkeypatch.setattr(legacy_compat, "is_ai_reader_available", lambda: False)
-    monkeypatch.setattr(legacy_compat, "is_caller_subagent", lambda: True)
+    _available(monkeypatch, on=False)
     _set_argv()
     assert legacy_compat.run_legacy_agent_audit() is None
 

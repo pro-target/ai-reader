@@ -16,10 +16,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 
@@ -67,38 +65,6 @@ def _run(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
 
 
-_SUBAGENT_VARS = (
-    "CLAUDE_CODE_SUBAGENT",
-    "CODEX_SUBAGENT_TASK_ID",
-    "OPENCODE_PARENT_ID",
-    "GEMINI_SUBAGENT",
-)
-
-
-@contextmanager
-def _subagent_env(**values: str) -> Iterator[dict[str, str | None]]:
-    """Temporarily set the subagent env vars; restore on exit.
-
-    Yields the previously-stored value of ``CLAUDE_CODE_SUBAGENT``
-    (the marker most tests care about).
-    """
-    saved: dict[str, str | None] = {}
-    for var in _SUBAGENT_VARS:
-        saved[var] = os.environ.get(var)
-        if var in values:
-            os.environ[var] = values[var]
-        else:
-            os.environ.pop(var, None)
-    try:
-        yield saved["CLAUDE_CODE_SUBAGENT"]
-    finally:
-        for var, previous in saved.items():
-            if previous is None:
-                os.environ.pop(var, None)
-            else:
-                os.environ[var] = previous
-
-
 # ---------------------------------------------------------------------------
 # Tool registration
 # ---------------------------------------------------------------------------
@@ -121,11 +87,9 @@ def test_mcp_tool_registration() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_mcp_list_sessions_subagent() -> None:
-    """With the Claude subagent marker set, real sessions come back."""
-    with _subagent_env(CLAUDE_CODE_SUBAGENT="1"):
-        texts = _run(_call("list_sessions", {"agent": "claude"}))
-
+def test_mcp_list_sessions_claude() -> None:
+    """Real sessions come back as summary dicts."""
+    texts = _run(_call("list_sessions", {"agent": "claude"}))
     sessions = [json.loads(t) for t in texts if t.strip().startswith("{")]
     if sessions:
         s = sessions[0]
@@ -135,15 +99,6 @@ def test_mcp_list_sessions_subagent() -> None:
         assert "date" in s
         assert "message_count" in s
         assert s["agent"] == "CLAUDE"
-
-
-def test_mcp_list_sessions_parent_denied() -> None:
-    """Without any subagent marker, the tool returns a single error dict."""
-    with _subagent_env():
-        texts = _run(_call("list_sessions", {"agent": "claude"}))
-    assert texts, "expected a structured error response"
-    payload = json.loads(texts[0])
-    assert payload.get("error") == "permission_denied"
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +115,7 @@ def _first_claude_uuid() -> str | None:
     return None
 
 
-def test_mcp_read_session_subagent() -> None:
+def test_mcp_read_session_existing() -> None:
     uuid = _first_claude_uuid()
     if uuid is None:
         pytest.skip("no real Claude session on this host")
@@ -171,8 +126,7 @@ def test_mcp_read_session_subagent() -> None:
     saved_home = os.environ.get("AI_READER_HOME")
     os.environ.pop("AI_READER_HOME", None)
     try:
-        with _subagent_env(CLAUDE_CODE_SUBAGENT="1"):
-            texts = _run(_call("read_session", {"uuid": uuid, "agent": "claude"}))
+        texts = _run(_call("read_session", {"uuid": uuid, "agent": "claude"}))
     finally:
         if saved_home is not None:
             os.environ["AI_READER_HOME"] = saved_home
@@ -185,28 +139,16 @@ def test_mcp_read_session_subagent() -> None:
 
 
 def test_mcp_read_session_invalid_uuid() -> None:
-    """The guard runs after argument validation, so the empty uuid is
-    caught first and reported as ``invalid_argument``.
-    """
-    with _subagent_env(CLAUDE_CODE_SUBAGENT="1"):
-        texts = _run(_call("read_session", {"uuid": "", "agent": "claude"}))
+    """The empty uuid is caught first and reported as ``invalid_argument``."""
+    texts = _run(_call("read_session", {"uuid": "", "agent": "claude"}))
     payload = json.loads(texts[0])
     assert payload.get("error") == "invalid_argument"
 
 
 def test_mcp_read_session_unknown_agent() -> None:
-    with _subagent_env(CLAUDE_CODE_SUBAGENT="1"):
-        texts = _run(_call("read_session", {"uuid": "x", "agent": "mystery"}))
+    texts = _run(_call("read_session", {"uuid": "x", "agent": "mystery"}))
     payload = json.loads(texts[0])
     assert payload.get("error") == "invalid_argument"
-
-
-def test_mcp_read_session_parent_denied() -> None:
-    """No subagent env -> error dict, not a raised exception."""
-    with _subagent_env():
-        texts = _run(_call("read_session", {"uuid": "x", "agent": "claude"}))
-    payload = json.loads(texts[0])
-    assert payload.get("error") == "permission_denied"
 
 
 # ---------------------------------------------------------------------------
@@ -214,11 +156,10 @@ def test_mcp_read_session_parent_denied() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_mcp_search_subagent() -> None:
-    with _subagent_env(CLAUDE_CODE_SUBAGENT="1"):
-        texts = _run(
-            _call("search_sessions", {"query": "claude", "agent": "claude"})
-        )
+def test_mcp_search_claude() -> None:
+    texts = _run(
+        _call("search_sessions", {"query": "claude", "agent": "claude"})
+    )
     matches = [json.loads(t) for t in texts if t.strip().startswith("{")]
     if matches:
         m = matches[0]
@@ -226,20 +167,9 @@ def test_mcp_search_subagent() -> None:
 
 
 def test_mcp_search_empty_query() -> None:
-    """An empty query short-circuits to an empty list — no guard call."""
-    with _subagent_env(CLAUDE_CODE_SUBAGENT="1"):
-        texts = _run(_call("search_sessions", {"query": ""}))
+    """An empty query short-circuits to an empty list."""
+    texts = _run(_call("search_sessions", {"query": ""}))
     assert texts == [] or json.loads(texts[0]) == []
-
-
-def test_mcp_search_parent_denied() -> None:
-    with _subagent_env():
-        texts = _run(
-            _call("search_sessions", {"query": "x", "agent": "claude"})
-        )
-    assert texts, "expected a structured error response"
-    payload = json.loads(texts[0])
-    assert payload.get("error") == "permission_denied"
 
 
 # ---------------------------------------------------------------------------
@@ -259,25 +189,6 @@ def test_mcp_server_name() -> None:
 # helpers (and the tool callables themselves) directly from the test
 # thread restores the coverage attribution.
 # ---------------------------------------------------------------------------
-
-
-@contextmanager
-def _isolated_env(**env: str) -> Iterator[dict[str, str | None]]:
-    """Run a block with the given env vars; restore on exit."""
-    saved = {k: os.environ.get(k) for k in _SUBAGENT_VARS}
-    for k in _SUBAGENT_VARS:
-        if k in env:
-            os.environ[k] = env[k]
-        else:
-            os.environ.pop(k, None)
-    try:
-        yield saved
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 
 
 def test_iso_helper_naive_datetime() -> None:
@@ -482,53 +393,34 @@ def test_extract_messages_unsupported_agent(tmp_path: Path) -> None:
 
 def test_list_sessions_invalid_agent_returns_error_dict() -> None:
     """An unknown ``agent`` is surfaced as a structured error list."""
-    with _isolated_env():
-        result = list_sessions(agent="mystery")
+    result = list_sessions(agent="mystery")
     assert isinstance(result, list)
     assert result and result[0].get("error") == "invalid_argument"
 
 
-def test_list_sessions_parent_denied_returns_error_dict() -> None:
-    """A parent caller gets a single-element error list."""
-    with _isolated_env():
-        result = list_sessions(agent="claude")
-    assert isinstance(result, list)
-    assert result and result[0].get("error") == "permission_denied"
-
-
 def test_read_session_invalid_uuid_returns_error_dict() -> None:
-    with _isolated_env(CLAUDE_CODE_SUBAGENT="1"):
-        result = read_session(uuid="", agent="claude")
+    result = read_session(uuid="", agent="claude")
     assert isinstance(result, dict)
     assert result.get("error") == "invalid_argument"
 
 
 def test_read_session_unknown_agent_returns_error_dict() -> None:
-    with _isolated_env(CLAUDE_CODE_SUBAGENT="1"):
-        result = read_session(uuid="x", agent="mystery")
+    result = read_session(uuid="x", agent="mystery")
     assert isinstance(result, dict)
     assert result.get("error") == "invalid_argument"
 
 
-def test_read_session_parent_denied_returns_error_dict() -> None:
-    with _isolated_env():
-        result = read_session(uuid="x", agent="claude")
-    assert isinstance(result, dict)
-    assert result.get("error") == "permission_denied"
-
-
 def test_read_session_not_found_returns_error_dict() -> None:
-    """Subagent + nonexistent uuid -> ``not_found`` error dict."""
+    """A nonexistent uuid -> ``not_found`` error dict."""
     # Disable AI_READER_HOME so the parser looks at the real tree,
     # then ask for a uuid that is not in it.
     saved_home = os.environ.get("AI_READER_HOME")
     os.environ.pop("AI_READER_HOME", None)
     try:
-        with _isolated_env(CLAUDE_CODE_SUBAGENT="1"):
-            result = read_session(
-                uuid="definitely-not-a-real-uuid-xyzzy",
-                agent="claude",
-            )
+        result = read_session(
+            uuid="definitely-not-a-real-uuid-xyzzy",
+            agent="claude",
+        )
     finally:
         if saved_home is not None:
             os.environ["AI_READER_HOME"] = saved_home
@@ -538,20 +430,11 @@ def test_read_session_not_found_returns_error_dict() -> None:
 
 
 def test_search_sessions_empty_query_returns_empty() -> None:
-    """An empty query short-circuits to ``[]`` *without* calling the guard."""
-    with _isolated_env():
-        assert search_sessions(query="") == []
+    """An empty query short-circuits to ``[]``."""
+    assert search_sessions(query="") == []
 
 
 def test_search_sessions_invalid_agent_returns_error_dict() -> None:
-    with _isolated_env(CLAUDE_CODE_SUBAGENT="1"):
-        result = search_sessions(query="x", agent="mystery")
+    result = search_sessions(query="x", agent="mystery")
     assert isinstance(result, list)
     assert result and result[0].get("error") == "invalid_argument"
-
-
-def test_search_sessions_parent_denied_returns_error_dict() -> None:
-    with _isolated_env():
-        result = search_sessions(query="x", agent="claude")
-    assert isinstance(result, list)
-    assert result and result[0].get("error") == "permission_denied"

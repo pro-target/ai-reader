@@ -70,6 +70,12 @@ def _first_claude_uuid() -> str | None:
 # ---------------------------------------------------------------------------
 
 
+_ENV_KEYS = (
+    "AI_READER_HOME",
+    "OPENCODE_DB",
+)
+
+
 def _run_inproc(
     argv: list[str], env: dict[str, str] | None = None
 ) -> tuple[int, str, str]:
@@ -94,16 +100,6 @@ def _run_inproc(
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-
-
-_ENV_KEYS = (
-    "CLAUDE_CODE_SUBAGENT",
-    "CODEX_SUBAGENT_TASK_ID",
-    "OPENCODE_PARENT_ID",
-    "GEMINI_SUBAGENT",
-    "AI_READER_HOME",
-    "OPENCODE_DB",
-)
 
 
 # ---------------------------------------------------------------------------
@@ -137,24 +133,15 @@ def test_cli_no_subcommand_returns_1() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_cli_list_subagent() -> None:
-    p = _run_cli(
-        "list",
-        "--agent", "claude",
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+def test_cli_list_claude() -> None:
+    p = _run_cli("list", "--agent", "claude")
     assert p.returncode == 0, p.stderr
     assert "UUID" in p.stdout
     assert "AGENT" in p.stdout
 
 
 def test_cli_list_json() -> None:
-    p = _run_cli(
-        "list",
-        "--agent", "claude",
-        "--json",
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    p = _run_cli("list", "--agent", "claude", "--json")
     assert p.returncode == 0, p.stderr
     payload = json.loads(p.stdout)
     assert isinstance(payload, list)
@@ -180,78 +167,46 @@ def test_cli_list_empty() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_cli_read_subagent_existing() -> None:
+def test_cli_read_existing() -> None:
     uuid = _first_claude_uuid()
     if uuid is None:
         pytest.skip("no real Claude session on this host")
-    p = _run_cli(
-        "read",
-        "--agent", "claude",
-        uuid,
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    p = _run_cli("read", "--agent", "claude", uuid)
     assert p.returncode == 0, p.stderr
     assert uuid in p.stdout
     assert "UUID:" in p.stdout
 
 
-def test_cli_read_subagent_json() -> None:
+def test_cli_read_json() -> None:
     uuid = _first_claude_uuid()
     if uuid is None:
         pytest.skip("no real Claude session on this host")
-    p = _run_cli(
-        "read",
-        "--agent", "claude",
-        "--json",
-        uuid,
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    p = _run_cli("read", "--agent", "claude", "--json", uuid)
     assert p.returncode == 0, p.stderr
     payload = json.loads(p.stdout)
     assert payload["uuid"] == uuid
     assert payload["agent"] == "CLAUDE"
 
 
-def test_cli_read_parent_denied() -> None:
-    """No subagent env -> guard refuses -> exit 2."""
-    uuid = _first_claude_uuid() or "fake-uuid"
-    p = _run_cli("read", "--agent", "claude", uuid)
-    assert p.returncode == 2, p.stderr
-    assert "permission denied" in p.stderr.lower()
-
-
 def test_cli_read_invalid_uuid_format() -> None:
     """A uuid that fails the regex (e.g. contains whitespace) -> non-zero."""
-    p = _run_cli(
-        "read",
-        "--agent", "claude",
-        "has spaces",
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    p = _run_cli("read", "--agent", "claude", "has spaces")
     assert p.returncode != 0
 
 
 def test_cli_read_unknown_agent() -> None:
-    p = _run_cli(
-        "read",
-        "--agent", "mystery",
-        "some-uuid",
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    p = _run_cli("read", "--agent", "mystery", "some-uuid")
     assert p.returncode != 0
 
 
 def test_cli_read_missing_uuid() -> None:
-    p = _run_cli("read", "--agent", "claude", env={"CLAUDE_CODE_SUBAGENT": "1"})
+    p = _run_cli("read", "--agent", "claude")
     assert p.returncode != 0
 
 
 def test_cli_read_not_found() -> None:
     """Valid uuid format but no such session -> exit 3 (not found)."""
-    rc, out, err = _run_inproc(
-        ["read", "--agent", "claude", "definitely-not-here"],
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    rc, out, err = _run_inproc(["read", "--agent", "claude", "definitely-not-here"])
     assert rc == 3
     assert "not found" in err.lower()
 
@@ -261,39 +216,26 @@ def test_cli_read_not_found() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_cli_search_subagent() -> None:
-    p = _run_cli(
-        "search",
-        "claude",
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+def test_cli_search_claude() -> None:
+    p = _run_cli("search", "claude")
     assert p.returncode == 0, p.stderr
     assert "UUID" in p.stdout or "(no sessions match" in p.stderr
 
 
 def test_cli_search_no_results() -> None:
-    p = _run_cli(
-        "search",
-        "this-string-should-match-nothing-xyzzy123",
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    p = _run_cli("search", "this-string-should-match-nothing-xyzzy123")
     assert p.returncode == 0, p.stderr
     assert "no sessions match" in p.stderr.lower()
 
 
 def test_cli_search_empty_query_rejected() -> None:
-    p = _run_cli("search", "", env={"CLAUDE_CODE_SUBAGENT": "1"})
+    p = _run_cli("search", "")
     assert p.returncode != 0
     assert "search query" in p.stderr.lower()
 
 
 def test_cli_search_json() -> None:
-    p = _run_cli(
-        "search",
-        "claude",
-        "--json",
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    p = _run_cli("search", "claude", "--json")
     assert p.returncode == 0, p.stderr
     payload = json.loads(p.stdout)
     assert isinstance(payload, list)
@@ -304,116 +246,77 @@ def test_cli_search_json() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_cli_inproc_list_subagent() -> None:
+def test_cli_inproc_list_claude() -> None:
     """In-process: drives ``cli.main`` directly so coverage counts."""
-    rc, out, err = _run_inproc(
-        ["list", "--agent", "claude"],
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    rc, out, err = _run_inproc(["list", "--agent", "claude"])
     assert rc == 0
     assert "UUID" in out
 
 
 def test_cli_inproc_list_json() -> None:
-    rc, out, err = _run_inproc(
-        ["list", "--agent", "claude", "--json"],
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    rc, out, err = _run_inproc(["list", "--agent", "claude", "--json"])
     assert rc == 0
     payload = json.loads(out)
     assert isinstance(payload, list)
 
 
-def test_cli_inproc_read_parent_denied() -> None:
-    rc, out, err = _run_inproc(["read", "--agent", "claude", "any-uuid"])
-    assert rc == 2
-    assert "permission denied" in err.lower()
-
-
-def test_cli_inproc_read_subagent_existing() -> None:
+def test_cli_inproc_read_existing() -> None:
     uuid = _first_claude_uuid()
     if uuid is None:
         pytest.skip("no real Claude session on this host")
-    rc, out, err = _run_inproc(
-        ["read", "--agent", "claude", uuid],
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    rc, out, err = _run_inproc(["read", "--agent", "claude", uuid])
     assert rc == 0
     assert uuid in out
 
 
-def test_cli_inproc_read_subagent_json() -> None:
+def test_cli_inproc_read_json() -> None:
     uuid = _first_claude_uuid()
     if uuid is None:
         pytest.skip("no real Claude session on this host")
-    rc, out, err = _run_inproc(
-        ["read", "--agent", "claude", "--json", uuid],
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    rc, out, err = _run_inproc(["read", "--agent", "claude", "--json", uuid])
     assert rc == 0
     payload = json.loads(out)
     assert payload["uuid"] == uuid
 
 
 def test_cli_inproc_read_invalid_uuid() -> None:
-    rc, out, err = _run_inproc(
-        ["read", "--agent", "claude", "has spaces"],
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    rc, out, err = _run_inproc(["read", "--agent", "claude", "has spaces"])
     # Regex check fails -> ValueError -> exit 1.
     assert rc == 1
 
 
 def test_cli_inproc_read_unknown_agent() -> None:
     """Argparse rejects unknown ``--agent`` choice -> exit 2."""
-    rc, out, err = _run_inproc(
-        ["read", "--agent", "mystery", "some-uuid"],
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    rc, out, err = _run_inproc(["read", "--agent", "mystery", "some-uuid"])
     assert rc == 2
 
 
 def test_cli_inproc_read_missing_uuid_arg() -> None:
     """No uuid -> argparse usage error."""
-    rc, out, err = _run_inproc(
-        ["read", "--agent", "claude"],
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    rc, out, err = _run_inproc(["read", "--agent", "claude"])
     assert rc != 0
 
 
-def test_cli_inproc_search_subagent() -> None:
-    rc, out, err = _run_inproc(
-        ["search", "claude"],
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+def test_cli_inproc_search_claude() -> None:
+    rc, out, err = _run_inproc(["search", "claude"])
     assert rc == 0
     assert "UUID" in out or "no sessions match" in err.lower()
 
 
 def test_cli_inproc_search_no_results() -> None:
-    rc, out, err = _run_inproc(
-        ["search", "xyzzy-zzz-nothing-matches-12345"],
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    rc, out, err = _run_inproc(["search", "xyzzy-zzz-nothing-matches-12345"])
     assert rc == 0
     assert "no sessions match" in err.lower()
 
 
 def test_cli_inproc_search_empty_query() -> None:
-    rc, out, err = _run_inproc(
-        ["search", ""],
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    rc, out, err = _run_inproc(["search", ""])
     assert rc == 1
     assert "search query" in err.lower()
 
 
 def test_cli_inproc_search_json_no_results() -> None:
-    rc, out, err = _run_inproc(
-        ["search", "xyzzy", "--json"],
-        env={"CLAUDE_CODE_SUBAGENT": "1"},
-    )
+    rc, out, err = _run_inproc(["search", "xyzzy", "--json"])
     assert rc == 0
     payload = json.loads(out)
     assert payload == []
