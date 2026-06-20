@@ -157,3 +157,47 @@ def test_scan_file_returns_none_on_unreadable(tmp_path: Path) -> None:
     # Point at a path that doesn't exist; the inner ``open`` will raise OSError.
     ghost = tmp_path / "nope.jsonl"
     assert _scan_file(ghost) is None
+
+
+# ---------------------------------------------------------------------------
+# read_messages
+# ---------------------------------------------------------------------------
+
+
+def test_read_messages_basic(fake_codex_session: Path, tmp_sessions_dir: Path) -> None:
+    base = str(tmp_sessions_dir / ".codex" / "sessions")
+    msgs = codex.read_messages("test-codex-1", base_dir=base)
+    assert len(msgs) == 2
+    assert msgs[0].role == "user"
+    assert msgs[0].text == "Roll out please"
+    assert msgs[1].role == "assistant"
+    assert msgs[1].text == "Done."
+
+
+def test_read_messages_preserves_tool_calls(
+    fake_codex_session_with_tools: Path, tmp_sessions_dir: Path
+) -> None:
+    base = str(tmp_sessions_dir / ".codex" / "sessions")
+    msgs = codex.read_messages("codex-tools-1", base_dir=base)
+    # user message + function_call + function_call_output
+    assert len(msgs) == 3
+    assert msgs[0].role == "user"
+    call = msgs[1]
+    assert call.role == "assistant"
+    assert len(call.tool_use) == 1
+    assert call.tool_use[0]["name"] == "shell"
+    assert call.tool_use[0]["input"] == "pytest"
+    out = msgs[2]
+    assert out.role == "tool"
+    assert len(out.tool_result) == 1
+    assert out.tool_result[0]["content"] == "5 passed"
+
+
+def test_read_messages_missing_raises(tmp_sessions_dir: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        codex.read_messages("nope", base_dir=str(tmp_sessions_dir / ".codex" / "sessions"))
+
+
+def test_read_messages_invalid_uuid(tmp_sessions_dir: Path) -> None:
+    with pytest.raises(ValueError):
+        codex.read_messages("../escape", base_dir=str(tmp_sessions_dir / ".codex" / "sessions"))

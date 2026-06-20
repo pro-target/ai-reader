@@ -11,7 +11,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
@@ -75,6 +75,69 @@ def _iso(date: datetime) -> str:
     return date.isoformat()
 
 
+def _parse_date(value: str, field: str) -> datetime:
+    """Parse a YYYY-MM-DD string to a naive datetime at 00:00."""
+    try:
+        return datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"invalid {field} {value!r}: expected YYYY-MM-DD") from exc
+
+
+def _parse_date(value: str, field: str) -> datetime:
+    """Parse a YYYY-MM-DD string to a naive datetime at 00:00."""
+    try:
+        return datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"invalid {field} {value!r}: expected YYYY-MM-DD") from exc
+
+
+def _validate_date_args(args: argparse.Namespace) -> None:
+    """Eagerly validate ``--from-date``/``--to-date`` strings.
+
+    Raises ``ValueError`` (with a field-tagged message) on bad input so
+    the caller can route it through :func:`_exit_with_error`.
+    """
+    from_raw = getattr(args, "from_date", None)
+    if from_raw:
+        _parse_date(from_raw, "--from-date")
+    to_raw = getattr(args, "to_date", None)
+    if to_raw:
+        _parse_date(to_raw, "--to-date")
+
+
+def _passes_date_filters(session: Session, args: argparse.Namespace) -> bool:
+    """Return True if ``session.date`` survives the date flags on ``args``.
+
+    ``--days``, ``--from-date`` and ``--to-date`` combine with AND
+    semantics.  Sessions whose ``date`` is timezone-aware are compared
+    against naive filters by dropping the tzinfo (parsers store naive
+    timestamps in practice).
+    """
+    date = session.date
+    if date.tzinfo is not None:
+        date = date.replace(tzinfo=None)
+
+    days = getattr(args, "days", None)
+    if days:
+        cutoff = datetime.now() - timedelta(days=days)
+        if date < cutoff:
+            return False
+
+    from_raw = getattr(args, "from_date", None)
+    if from_raw:
+        if date < _parse_date(from_raw, "--from-date"):
+            return False
+
+    to_raw = getattr(args, "to_date", None)
+    if to_raw:
+        if date > _parse_date(to_raw, "--to-date").replace(
+            hour=23, minute=59, second=59
+        ):
+            return False
+
+    return True
+
+
 def _format_table(rows: Sequence[dict[str, Any]]) -> str:
     """Render a list of session summaries as a fixed-width table."""
     headers = {
@@ -133,11 +196,14 @@ def _format_session_detail(
         else:
             for idx, msg in enumerate(messages, start=1):
                 role = msg.get("role", "?")
-                content = msg.get("content", "") or ""
+                content = msg.get("text", msg.get("content", "")) or ""
                 if len(content) > 400:
                     content = content[:397] + "..."
                 lines.append(f"--- [{idx}] {role} ---")
                 lines.append(content)
+                tool_names = msg.get("tool_use") or []
+                if tool_names:
+                    lines.append(f"[tool_use: {', '.join(tool_names)}]")
     return "\n".join(lines)
 
 
@@ -156,9 +222,26 @@ def _exit_with_error(message: str, code: int = 1) -> "int":
     return code
 
 
+def _messages_to_dicts(messages: Sequence[Any]) -> List[dict[str, Any]]:
+    """Flatten :class:`Message` objects to plain dicts for display/JSON."""
+    out: List[dict[str, Any]] = []
+    for msg in messages:
+        tool_use = msg.tool_use or ()
+        names = [t.get("name", "?") for t in tool_use if isinstance(t, dict)]
+        out.append(
+            {
+                "role": msg.role,
+                "text": msg.text or "",
+                "tool_use": names,
+            }
+        )
+    return out
+
+
 def _run_list(args: argparse.Namespace) -> int:
     try:
         targets = _target_agents(args.agent)
+        _validate_date_args(args)
     except ValueError as exc:
         return _exit_with_error(str(exc))
 
@@ -166,7 +249,12 @@ def _run_list(args: argparse.Namespace) -> int:
     for agent_name in targets:
         parser = _PARSERS[agent_name]
         for session in parser.list_sessions():
-            summaries.append(_session_to_dict(session))
+            if _passes_date_filters(session, args):
+                summaries.append(_session_to_dict(session))
+
+    limit = getattr(args, "limit", None)
+    if limit:
+        summaries = summaries[:limit]
 
     if args.json:
         json.dump(summaries, sys.stdout, ensure_ascii=False, indent=2)
@@ -195,17 +283,34 @@ def _run_read(args: argparse.Namespace) -> int:
     except ValueError as exc:
         return _exit_with_error(str(exc))
 
+    want_messages = bool(getattr(args, "messages", False))
+    message_dicts: Optional[List[dict[str, Any]]] = None
+    if want_messages:
+        read_messages = getattr(parser, "read_messages", None)
+        if read_messages is None:
+            print(
+                f"ai-reader: read_messages unavailable for {agent_name.value}",
+                file=sys.stderr,
+            )
+        else:
+            try:
+                raw_messages = read_messages(uuid)
+                message_dicts = _messages_to_dicts(raw_messages)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"ai-reader: failed to read messages: {exc}",
+                    file=sys.stderr,
+                )
+
     if args.json:
-        json.dump(
-            _session_to_dict(session),
-            sys.stdout,
-            ensure_ascii=False,
-            indent=2,
-        )
+        payload = _session_to_dict(session)
+        if want_messages and message_dicts is not None:
+            payload["messages"] = message_dicts
+        json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
         sys.stdout.write("\n")
         return 0
 
-    print(_format_session_detail(session))
+    print(_format_session_detail(session, messages=message_dicts))
     return 0
 
 
@@ -216,6 +321,7 @@ def _run_search(args: argparse.Namespace) -> int:
 
     try:
         targets = _target_agents(args.agent)
+        _validate_date_args(args)
     except ValueError as exc:
         return _exit_with_error(str(exc))
 
@@ -223,7 +329,12 @@ def _run_search(args: argparse.Namespace) -> int:
     for agent_name in targets:
         parser = _PARSERS[agent_name]
         for session in parser.search(query):
-            summaries.append(_session_to_dict(session))
+            if _passes_date_filters(session, args):
+                summaries.append(_session_to_dict(session))
+
+    limit = getattr(args, "limit", None)
+    if limit:
+        summaries = summaries[:limit]
 
     if args.json:
         json.dump(summaries, sys.stdout, ensure_ascii=False, indent=2)
@@ -263,6 +374,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit JSON instead of a human-readable table.",
     )
+    _add_filter_group(list_p)
     list_p.set_defaults(func=_run_list)
 
     read_p = sub.add_parser("read", help="Read a single session by uuid")
@@ -278,6 +390,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit JSON instead of a human-readable dump.",
     )
+    read_p.add_argument(
+        "--messages",
+        action="store_true",
+        help="Also dump the session's messages (truncated text + tool names).",
+    )
     read_p.set_defaults(func=_run_read)
 
     search_p = sub.add_parser("search", help="Case-insensitive title search")
@@ -292,9 +409,48 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit JSON instead of a human-readable table.",
     )
+    _add_filter_group(search_p)
     search_p.set_defaults(func=_run_search)
 
     return parser
+
+
+def _add_filter_group(parser: argparse.ArgumentParser) -> None:
+    """Attach the shared result-limiting/date filter flags to ``parser``."""
+    grp = parser.add_argument_group("filtering")
+    grp.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Truncate the result table to N rows (after filtering).",
+    )
+    grp.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Keep sessions within the last N days (vs. now).",
+    )
+    grp.add_argument(
+        "--from-date",
+        dest="from_date",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Keep sessions dated on/after this date.",
+    )
+    grp.add_argument(
+        "--to-date",
+        dest="to_date",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Keep sessions dated on/before this date (end of day).",
+    )
+    grp.add_argument(
+        "--all",
+        action="store_true",
+        help="No-op: listing already defaults to all agents.",
+    )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

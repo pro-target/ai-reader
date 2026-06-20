@@ -281,19 +281,22 @@ def test_extract_messages_claude_empty_file(tmp_path: Path) -> None:
 
 
 def test_extract_messages_claude_content_list(tmp_path: Path) -> None:
-    """``content`` is a list of parts; concatenate every text chunk
-    (the function does not filter by ``part.type``)."""
+    """``content`` is a list of parts; only ``text`` parts contribute to
+    the concatenated content.  ``tool_use`` parts are routed to the
+    structured ``tool_use`` field on the underlying :class:`Message` and
+    do not leak their ``text`` into ``content`` (the MCP shim projects
+    only ``text`` into ``content``)."""
     p = tmp_path / "session.jsonl"
     p.write_text(
         '{"type":"assistant","message":{"role":"assistant","content":['
         '{"type":"text","text":"a"},'
         '{"type":"text","text":"b"},'
-        '{"type":"tool_use","text":"c"}'
+        '{"type":"tool_use","name":"Bash","input":"ls"}'
         ']}}\n',
         encoding="utf-8",
     )
     msgs = _extract_messages_claude(str(p))
-    assert msgs[0]["content"] == "a\nb\nc"
+    assert msgs[0]["content"] == "a\nb"
 
 
 def test_extract_messages_claude_missing_file(tmp_path: Path) -> None:
@@ -503,3 +506,65 @@ def test_search_sessions_invalid_agent_returns_error_dict() -> None:
     result = search_sessions(query="x", agent="mystery")
     assert isinstance(result, list)
     assert result and result[0].get("error") == "invalid_argument"
+
+
+# ---------------------------------------------------------------------------
+# read_session regression: capped {role, content} list via the public API
+# ---------------------------------------------------------------------------
+
+
+def test_read_session_returns_capped_role_content_list(
+    fake_claude_session: Path, tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``read_session`` must still return a list of ``{role, content}`` dicts
+    (no tool_use/tool_result keys leak into MCP output)."""
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = read_session(uuid="test-claude-1", agent="claude")
+    assert isinstance(result, dict)
+    assert "error" not in result
+    msgs = result["messages"]
+    assert isinstance(msgs, list)
+    assert len(msgs) == 2
+    for m in msgs:
+        assert set(m.keys()) == {"role", "content"}
+    assert msgs[0] == {"role": "user", "content": "Hello, world"}
+    assert msgs[1] == {"role": "assistant", "content": "Hi there!"}
+
+
+def test_read_session_mcp_drops_tool_messages(
+    fake_pi_session: Path, tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pi toolResult records become ``tool`` Message objects; MCP output
+    must NOT surface them (only user/assistant), preserving the historical
+    output shape."""
+    base = str(tmp_sessions_dir / ".pi" / "agent" / "sessions")
+    monkeypatch.setattr(
+        "ai_reader.parsers.pi._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = read_session(uuid="test-pi-1", agent="pi")
+    msgs = result["messages"]
+    roles = [m["role"] for m in msgs]
+    assert roles == ["user", "assistant"]
+    for m in msgs:
+        assert set(m.keys()) == {"role", "content"}
+
+
+def test_message_and_read_messages_reexported() -> None:
+    """``Message`` and the per-parser ``read_messages`` are public API."""
+    from ai_reader.parsers import Message, antigravity, claude, codex, opencode, pi
+
+    sample = Message(role="user", text="hi")
+    assert sample.role == "user"
+    assert sample.tool_use == ()
+    assert sample.tool_result == ()
+    for mod in (claude, codex, opencode, antigravity, pi):
+        assert callable(getattr(mod, "read_messages"))
+
+
+def test_messages_cap_constant_unchanged() -> None:
+    from ai_reader.mcp_server import _MESSAGES_CAP
+
+    assert _MESSAGES_CAP == 100

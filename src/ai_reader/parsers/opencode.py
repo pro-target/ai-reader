@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
@@ -42,7 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
-from .models import AgentName, Session
+from .models import AgentName, Message, Session
 
 
 _TITLE_MAX_LEN = 100
@@ -290,6 +291,148 @@ def read_session(
         ValueError: ``uuid`` is malformed.
     """
     return _read_session_by_uuid(uuid, base_dir, override)
+
+
+
+_SELECT_MESSAGES = "SELECT data FROM message WHERE session_id = ?"
+
+
+def _opencode_message_from_data(data: object) -> Optional[Message]:
+    """Decode an OpenCode ``message.data`` JSON blob into a :class:`Message`.
+
+    OpenCode stores each message as a JSON blob whose shape follows the
+    AI SDK ``Message`` type.  We extract ``role``, concatenated text
+    parts, ``tool`` invocations (``toolName``/``input``) and
+    ``tool-result`` parts.  Returns ``None`` when the blob is unusable.
+    """
+    if not isinstance(data, str) or not data.strip():
+        return None
+    try:
+        record = json.loads(data)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    raw_role = record.get("role", "")
+    if not isinstance(raw_role, str):
+        return None
+    role = raw_role.lower()
+    if role == "tool":
+        mapped_role = "tool"
+    elif role in ("user", "assistant"):
+        mapped_role = role
+    else:
+        return None
+
+    text_chunks: List[str] = []
+    tool_use: List[dict] = []
+    tool_result: List[dict] = []
+
+    content = record.get("content")
+    if isinstance(content, str):
+        text_chunks.append(content)
+    elif isinstance(content, list):
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type", "")
+            if part_type in ("text", "input_text", "output_text", ""):
+                t = part.get("text", "")
+                if isinstance(t, str) and t:
+                    text_chunks.append(t)
+            elif part_type == "tool-call" or part_type == "toolCall":
+                name = part.get("toolName") or part.get("name") or ""
+                args = part.get("input") or part.get("args", "")
+                if isinstance(args, str):
+                    input_str = args
+                else:
+                    try:
+                        input_str = json.dumps(args, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        input_str = str(args)
+                tool_use.append({"name": name, "input": input_str})
+            elif part_type in ("tool-result", "toolResult"):
+                rc = part.get("content") or part.get("result", "")
+                if isinstance(rc, list):
+                    pieces: List[str] = []
+                    for piece in rc:
+                        if isinstance(piece, dict):
+                            t = piece.get("text", "")
+                            if isinstance(t, str) and t:
+                                pieces.append(t)
+                    rc = "\n".join(pieces)
+                elif not isinstance(rc, str):
+                    try:
+                        rc = json.dumps(rc, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        rc = str(rc)
+                tool_result.append({"content": rc})
+
+    # Top-level tool fields (some OpenCode versions store them flat).
+    if not tool_use:
+        tool_name = record.get("toolName") or record.get("tool_name")
+        if isinstance(tool_name, str) and tool_name:
+            args = record.get("input") or record.get("args", "")
+            if isinstance(args, str):
+                input_str = args
+            else:
+                try:
+                    input_str = json.dumps(args, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    input_str = str(args)
+            tool_use.append({"name": tool_name, "input": input_str})
+
+    return Message(
+        role=mapped_role,
+        text="\n".join(text_chunks),
+        tool_use=tuple(tool_use),
+        tool_result=tuple(tool_result),
+    )
+
+
+def _extract_messages_from_db(db_path: str, uuid: str) -> List[Message]:
+    """Read all messages for ``uuid`` from an OpenCode SQLite DB."""
+    messages: List[Message] = []
+    conn = _open_db(db_path)
+    if conn is None:
+        return messages
+    try:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        rows = cursor.execute(_SELECT_MESSAGES, (uuid,)).fetchall()
+    except sqlite3.Error:
+        conn.close()
+        return messages
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+    for row in rows:
+        data = row["data"] if "data" in row.keys() else None
+        parsed = _opencode_message_from_data(data)
+        if parsed is not None:
+            messages.append(parsed)
+    return messages
+
+
+def read_messages(
+    uuid: str,
+    base_dir: Optional[str] = None,
+    override: Optional[str] = None,
+) -> List[Message]:
+    """Return the full message list for an OpenCode session.
+
+    Reuses :func:`read_session` for path resolution (which also validates
+    the uuid).  Reads the ``message.data`` JSON blobs for the session and
+    preserves tool-call / tool-result structure where present.
+
+    Raises:
+        FileNotFoundError: no DB contains a session with this id.
+        ValueError: ``uuid`` is malformed.
+    """
+    session = read_session(uuid, base_dir, override)
+    return _extract_messages_from_db(session.path, session.uuid)
 
 
 def search(

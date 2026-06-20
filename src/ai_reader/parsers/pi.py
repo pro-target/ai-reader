@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
-from .models import AgentName, Session
+from .models import AgentName, Message, Session
 
 
 _TITLE_MAX_LEN = 100
@@ -267,6 +267,111 @@ def _find_session_file(uuid: str, base_dir: Optional[str]) -> Tuple[Path, Sessio
 def read_session(uuid: str, base_dir: Optional[str] = None) -> Session:
     _, session = _find_session_file(uuid, base_dir)
     return session
+
+
+
+def _pi_extract_message(message: dict) -> Optional[Message]:
+    """Convert a Pi ``message`` payload into a :class:`Message`.
+
+    Returns ``None`` for roles we do not surface (``toolResult`` records
+    with no usable content are still emitted as ``tool`` messages so the
+    audit trail is complete).  ``toolCall`` blocks become ``tool_use``
+    entries; ``thinking`` blocks are skipped from ``text``.
+    """
+    role = message.get("role")
+    content = message.get("content", "")
+    text_chunks: List[str] = []
+    tool_use: List[dict] = []
+    tool_result: List[dict] = []
+    if isinstance(content, str):
+        text_chunks.append(content)
+    elif isinstance(content, list):
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type", "")
+            if part_type in ("text", "input_text", "output_text", ""):
+                text = part.get("text", "")
+                if isinstance(text, str) and text:
+                    text_chunks.append(text)
+            elif part_type == "toolCall":
+                name = part.get("name", "")
+                args = part.get("arguments", part.get("input", ""))
+                if isinstance(args, str):
+                    input_str = args
+                else:
+                    try:
+                        input_str = json.dumps(args, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        input_str = str(args)
+                tool_use.append({"name": name, "input": input_str})
+            # ``thinking`` blocks are intentionally skipped here.
+    if role in ("user", "assistant"):
+        return Message(
+            role=role,
+            text="\n".join(text_chunks),
+            tool_use=tuple(tool_use),
+        )
+    if role == "toolResult":
+        result_text = "\n".join(text_chunks)
+        return Message(
+            role="tool",
+            text="",
+            tool_result=({"content": result_text},),
+        )
+    return None
+
+
+def _extract_messages_from_jsonl(path: Path) -> List[Message]:
+    """Read a Pi JSONL session into structured :class:`Message` objects.
+
+    Only ``message`` records with role ``user``, ``assistant`` or
+    ``toolResult`` are surfaced; other record types (``session``,
+    ``session_info``, ``model_change``) are skipped.  Lines that fail to
+    parse as JSON are silently skipped; an :class:`OSError` returns
+    whatever was collected so far.
+    """
+    messages: List[Message] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if record.get("type") != "message":
+                    continue
+                message = record.get("message") or {}
+                if not isinstance(message, dict):
+                    continue
+                parsed = _pi_extract_message(message)
+                if parsed is not None:
+                    messages.append(parsed)
+    except OSError:
+        return messages
+    return messages
+
+
+def read_messages(
+    uuid: str, base_dir: Optional[str] = None
+) -> List[Message]:
+    """Return the full message list for a Pi session.
+
+    Reuses :func:`read_session` for path resolution.  ``toolCall``
+    blocks on assistant messages and ``toolResult`` records are
+    preserved on the returned :class:`Message` objects.
+
+    Raises:
+        FileNotFoundError: the session does not exist.
+        ValueError: ``uuid`` is malformed.
+    """
+    session = read_session(uuid, base_dir)
+    return _extract_messages_from_jsonl(Path(session.path))
 
 
 def search(query: str, base_dir: Optional[str] = None) -> List[Session]:

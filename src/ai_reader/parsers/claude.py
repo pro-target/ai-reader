@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from .models import AgentName, Session
+from .models import AgentName, Message, Session
 
 
 _TITLE_MAX_LEN = 100
@@ -221,6 +221,111 @@ def read_session(uuid: str, base_dir: Optional[str] = None) -> Session:
             f"Claude session {uuid!r} at {path} yielded no parseable data"
         )
     return session
+
+
+def _extract_messages_from_jsonl(path: Path) -> List[Message]:
+    """Read a Claude JSONL file into structured :class:`Message` objects.
+
+    Assistant records yield ``text`` (from ``text`` blocks) and
+    ``tool_use`` entries (from ``tool_use`` blocks).  User records yield
+    ``text`` plus ``tool_result`` entries for any ``tool_result`` blocks
+    they carry (Claude embeds tool results in user-role records).
+
+    Lines that are not valid JSON or not ``user``/``assistant`` records
+    are silently skipped.  An :class:`OSError` reading the file returns
+    whatever was collected so far.
+    """
+    messages: List[Message] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                rec_type = record.get("type")
+                if rec_type not in ("user", "assistant"):
+                    continue
+                payload = record.get("message") or {}
+                if not isinstance(payload, dict):
+                    continue
+                content = payload.get("content", "")
+                text_chunks: List[str] = []
+                tool_use: List[dict] = []
+                tool_result: List[dict] = []
+                if isinstance(content, list):
+                    for part in content:
+                        if not isinstance(part, dict):
+                            continue
+                        part_type = part.get("type")
+                        if part_type == "text":
+                            text = part.get("text", "")
+                            if isinstance(text, str) and text:
+                                text_chunks.append(text)
+                        elif part_type == "tool_use":
+                            name = part.get("name", "")
+                            raw_input = part.get("input", "")
+                            if isinstance(raw_input, str):
+                                input_str = raw_input
+                            else:
+                                try:
+                                    input_str = json.dumps(
+                                        raw_input, ensure_ascii=False
+                                    )
+                                except (TypeError, ValueError):
+                                    input_str = str(raw_input)
+                            tool_use.append({"name": name, "input": input_str})
+                        elif part_type == "tool_result":
+                            result_content = part.get("content", "")
+                            if isinstance(result_content, list):
+                                # Tool results can themselves be a list
+                                # of text blocks; concatenate them.
+                                pieces: List[str] = []
+                                for piece in result_content:
+                                    if isinstance(piece, dict):
+                                        t = piece.get("text", "")
+                                        if isinstance(t, str) and t:
+                                            pieces.append(t)
+                                result_str = "\n".join(pieces)
+                            elif isinstance(result_content, str):
+                                result_str = result_content
+                            else:
+                                result_str = ""
+                            tool_result.append({"content": result_str})
+                elif isinstance(content, str):
+                    text_chunks.append(content)
+                messages.append(
+                    Message(
+                        role=rec_type,
+                        text="\n".join(text_chunks),
+                        tool_use=tuple(tool_use),
+                        tool_result=tuple(tool_result),
+                    )
+                )
+    except OSError:
+        return messages
+    return messages
+
+
+def read_messages(
+    uuid: str, base_dir: Optional[str] = None
+) -> List[Message]:
+    """Return the full message list for a Claude session.
+
+    Reuses :func:`read_session` for path resolution.  Tool calls and
+    tool results are preserved on the returned :class:`Message` objects.
+
+    Raises:
+        FileNotFoundError: the session does not exist.
+        ValueError: ``uuid`` is malformed.
+    """
+    session = read_session(uuid, base_dir)
+    return _extract_messages_from_jsonl(Path(session.path))
 
 
 def search(query: str, base_dir: Optional[str] = None) -> List[Session]:

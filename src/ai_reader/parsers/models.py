@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 class AgentName(str, Enum):
@@ -71,4 +71,34 @@ class Session:
     extra: dict = field(default_factory=dict, compare=False, repr=False)
 
 
-__all__ = ["AgentName", "Session"]
+@dataclass(frozen=True)
+class Message:
+    """A single conversation message extracted from a session file.
+
+    Unlike the flat ``{role, content}`` dicts produced for MCP clients,
+    :class:`Message` preserves the structured tool-call surface so audit
+    consumers can answer questions like "did the agent actually run the
+    tests?" by scanning ``tool_use`` entries.
+
+    Attributes:
+        role: One of ``"user"``, ``"assistant"`` or ``"tool"``.  Tool
+            results emitted by some agents as standalone records use
+            ``"tool"``; for agents that embed tool results inside user
+            records (Claude) the role stays ``"user"`` and the result
+            is exposed via :attr:`tool_result`.
+        text: Concatenated plain-text content (may be ``""`` when the
+            message is purely a tool call/result).
+        tool_use: Tuple of ``{"name": str, "input": str}`` dicts for
+            assistant tool invocations.  ``input`` is the raw tool
+            input serialized to a string (JSON for structured inputs).
+        tool_result: Tuple of ``{"content": str}`` dicts for tool
+            return values.
+    """
+
+    role: str
+    text: str
+    tool_use: Tuple[dict, ...] = ()
+    tool_result: Tuple[dict, ...] = ()
+
+
+__all__ = ["AgentName", "Message", "Session"]

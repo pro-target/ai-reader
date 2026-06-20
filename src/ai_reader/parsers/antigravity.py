@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from .models import AgentName, Session
+from .models import AgentName, Message, Session
 
 
 _TITLE_MAX_LEN = 100
@@ -272,6 +272,104 @@ def read_session(uuid: str, base_dir: Optional[str] = None) -> Session:
             f"Antigravity session {uuid!r} at {brain} yielded no parseable data"
         )
     return session
+
+
+
+def _antigravity_message_from_record(record: dict) -> Optional[Message]:
+    """Map an Antigravity transcript record to a :class:`Message`.
+
+    Antigravity transcript records carry ``source`` (``USER_EXPLICIT``,
+    ``MODEL``, …) and ``type`` (``USER_INPUT``, ``MODEL_OUTPUT``, …)
+    fields rather than an explicit ``role``.  We map ``USER_*`` records
+    to ``user`` and ``MODEL_*`` records to ``assistant``.  Text comes
+    from the ``content`` field; tool structure is best-effort because
+    Antigravity transcripts are heterogeneous.  Returns ``None`` when
+    the record cannot be classified.
+    """
+    source = record.get("source", "")
+    rtype = record.get("type", "")
+    if isinstance(source, str) and source.startswith("USER"):
+        role = "user"
+    elif isinstance(source, str) and source.startswith("MODEL"):
+        role = "assistant"
+    elif isinstance(rtype, str) and rtype.startswith("USER"):
+        role = "user"
+    elif isinstance(rtype, str) and rtype.startswith("MODEL"):
+        role = "assistant"
+    else:
+        return None
+    content = record.get("content", "")
+    if isinstance(content, list):
+        chunks: List[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                t = part.get("text", "")
+                if isinstance(t, str) and t:
+                    chunks.append(t)
+        text = "\n".join(chunks)
+    elif isinstance(content, str):
+        text = content
+    else:
+        text = ""
+    return Message(role=role, text=text)
+
+
+def _extract_messages_from_transcript(path: Path) -> List[Message]:
+    """Read an Antigravity transcript/overview JSONL into messages."""
+    messages: List[Message] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                parsed = _antigravity_message_from_record(record)
+                if parsed is not None:
+                    messages.append(parsed)
+    except OSError:
+        return messages
+    return messages
+
+
+def _extract_messages_from_brain(brain: Path) -> List[Message]:
+    """Read messages from the first available transcript file in a brain.
+
+    Tries each transcript candidate in order; the first one that exists
+    and yields records wins.  Falls back to ``overview.txt``.
+    """
+    for candidate in _TRANSCRIPT_CANDIDATES:
+        tpath = brain / candidate
+        if tpath.is_file():
+            messages = _extract_messages_from_transcript(tpath)
+            if messages:
+                return messages
+    overview = brain / _OVERVIEW
+    if overview.is_file():
+        return _extract_messages_from_transcript(overview)
+    return []
+
+
+def read_messages(
+    uuid: str, base_dir: Optional[str] = None
+) -> List[Message]:
+    """Return the full message list for an Antigravity session.
+
+    Reuses :func:`read_session` for path resolution.  Reads the first
+    available transcript file (``transcript.json``,
+    ``transcript_full.jsonl``, ``transcript.jsonl``) or ``overview.txt``.
+
+    Raises:
+        FileNotFoundError: the session does not exist.
+        ValueError: ``uuid`` is malformed.
+    """
+    session = read_session(uuid, base_dir)
+    return _extract_messages_from_brain(Path(session.path))
 
 
 def search(query: str, base_dir: Optional[str] = None) -> List[Session]:

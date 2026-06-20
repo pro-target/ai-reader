@@ -33,10 +33,11 @@ Modules:
 """
 
 from . import antigravity, claude, codex, opencode, pi
-from .models import AgentName, Session
+from .models import AgentName, Message, Session
 
 __all__ = [
     "AgentName",
+    "Message",
     "Session",
     "antigravity",
     "claude",

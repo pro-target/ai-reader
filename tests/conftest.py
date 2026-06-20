@@ -292,6 +292,266 @@ def fake_antigravity_brain(tmp_sessions_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Fixtures carrying tool calls (for read_messages tests)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_claude_session_with_tools(tmp_sessions_dir: Path) -> Path:
+    """A Claude session JSONL containing a tool_use + tool_result exchange."""
+    session_id = "claude-tools-1"
+    jsonl = tmp_sessions_dir / ".claude" / "projects" / "proj-t" / f"{session_id}.jsonl"
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "Run the tests"},
+                "timestamp": "2026-06-14T10:00:00Z",
+                "sessionId": session_id,
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "I'll run them now."},
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": "pytest"},
+                        },
+                    ],
+                },
+                "timestamp": "2026-06-14T10:00:05Z",
+                "sessionId": session_id,
+            },
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "content": "5 passed",
+                        }
+                    ],
+                },
+                "timestamp": "2026-06-14T10:00:10Z",
+                "sessionId": session_id,
+            },
+        ],
+    )
+    return jsonl
+
+
+@pytest.fixture
+def fake_codex_session_with_tools(tmp_sessions_dir: Path) -> Path:
+    """A Codex rollout with a function_call + function_call_output pair."""
+    uuid = "codex-tools-1"
+    jsonl = (
+        tmp_sessions_dir
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "06"
+        / "14"
+        / f"rollout-2026-06-14T11-00-00-{uuid}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "timestamp": "2026-06-14T11:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": uuid, "cwd": "/tmp/work"},
+            },
+            {
+                "timestamp": "2026-06-14T11:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Run pytest"}],
+                },
+            },
+            {
+                "timestamp": "2026-06-14T11:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "shell",
+                    "arguments": "pytest",
+                },
+            },
+            {
+                "timestamp": "2026-06-14T11:00:06Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "output": "5 passed",
+                },
+            },
+        ],
+    )
+    return jsonl
+
+
+@pytest.fixture
+def fake_pi_session_with_tools(tmp_sessions_dir: Path) -> Path:
+    """A Pi JSONL with an assistant toolCall + a toolResult record."""
+    uuid = "pi-tools-1"
+    jsonl = (
+        tmp_sessions_dir
+        / ".pi"
+        / "agent"
+        / "sessions"
+        / "--tmp-work--"
+        / f"2026-06-14T11-00-00-000Z_{uuid}.jsonl"
+    )
+    _write_jsonl(
+        jsonl,
+        [
+            {
+                "type": "session",
+                "id": uuid,
+                "timestamp": "2026-06-14T11:00:00.000Z",
+                "cwd": "/tmp/work",
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Run pytest"}],
+                    "timestamp": 1_718_360_002_000,
+                },
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Running now"},
+                        {
+                            "type": "toolCall",
+                            "name": "shell",
+                            "arguments": "pytest",
+                        },
+                    ],
+                    "timestamp": 1_718_360_004_000,
+                },
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "toolResult",
+                    "content": "5 passed",
+                    "timestamp": 1_718_360_005_000,
+                },
+            },
+        ],
+    )
+    return jsonl
+
+
+@pytest.fixture
+def fake_opencode_db_with_tools(tmp_sessions_dir: Path) -> Path:
+    """An OpenCode DB whose message rows carry JSON ``data`` blobs with tools."""
+    db_path = tmp_sessions_dir / "opencode_tools.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE session (
+            id           TEXT PRIMARY KEY,
+            parent_id    TEXT,
+            title        TEXT,
+            time_created INTEGER,
+            time_updated INTEGER
+        );
+        CREATE TABLE message (
+            id         TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES session(id),
+            data       TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO session VALUES (?, NULL, ?, ?, ?)",
+        ("oc-tools-1", "Tool session", 1_716_000_000_000, 1_716_000_500_000),
+    )
+    messages = [
+        {
+            "id": "oc-m1",
+            "session_id": "oc-tools-1",
+            "data": json.dumps({"role": "user", "content": "run tests"}),
+        },
+        {
+            "id": "oc-m2",
+            "session_id": "oc-tools-1",
+            "data": json.dumps(
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "okay"},
+                        {
+                            "type": "tool-call",
+                            "toolName": "shell",
+                            "input": "pytest",
+                        },
+                    ],
+                }
+            ),
+        },
+        {
+            "id": "oc-m3",
+            "session_id": "oc-tools-1",
+            "data": json.dumps(
+                {
+                    "role": "tool",
+                    "content": [
+                        {"type": "tool-result", "content": "5 passed"}
+                    ],
+                }
+            ),
+        },
+    ]
+    for m in messages:
+        conn.execute(
+            "INSERT INTO message VALUES (?, ?, ?)",
+            (m["id"], m["session_id"], m["data"]),
+        )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+@pytest.fixture
+def fake_antigravity_brain_with_transcript(tmp_sessions_dir: Path) -> Path:
+    """A brain directory whose transcript_full.jsonl carries user/model records."""
+    brain = tmp_sessions_dir / ".gemini" / "antigravity" / "brain" / "ag-tools-1"
+    (brain / ".system_generated" / "logs").mkdir(parents=True)
+    transcript = brain / ".system_generated" / "logs" / "transcript_full.jsonl"
+    _write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-14T10:00:00Z",
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "content": "Set up the lab",
+            },
+            {
+                "timestamp": "2026-06-14T10:00:05Z",
+                "source": "MODEL",
+                "type": "MODEL_OUTPUT",
+                "content": "Lab is ready",
+            },
+        ],
+    )
+    return brain
+
+
+# ---------------------------------------------------------------------------
 # Real-data probes (read-only, used by integration-style tests)
 # ---------------------------------------------------------------------------
 

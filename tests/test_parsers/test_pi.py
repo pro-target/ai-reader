@@ -133,3 +133,47 @@ def test_scan_file_without_header_returns_none(tmp_path: Path) -> None:
     p = tmp_path / "x.jsonl"
     p.write_text('{"type":"message"}\n', encoding="utf-8")
     assert _scan_file(p) is None
+
+
+# ---------------------------------------------------------------------------
+# read_messages
+# ---------------------------------------------------------------------------
+
+
+def test_read_messages_basic(fake_pi_session: Path, tmp_sessions_dir: Path) -> None:
+    base = str(tmp_sessions_dir / ".pi" / "agent" / "sessions")
+    msgs = pi.read_messages("test-pi-1", base_dir=base)
+    # user + assistant (the toolResult record is surfaced as a tool message)
+    assert len(msgs) == 3
+    assert msgs[0].role == "user"
+    assert msgs[0].text == "Add Pi support"
+    assert msgs[1].role == "assistant"
+    assert msgs[1].text == "Done."
+
+
+def test_read_messages_preserves_tool_calls(
+    fake_pi_session_with_tools: Path, tmp_sessions_dir: Path
+) -> None:
+    base = str(tmp_sessions_dir / ".pi" / "agent" / "sessions")
+    msgs = pi.read_messages("pi-tools-1", base_dir=base)
+    assert len(msgs) == 3
+    assistant = msgs[1]
+    assert assistant.role == "assistant"
+    assert assistant.text == "Running now"
+    assert len(assistant.tool_use) == 1
+    assert assistant.tool_use[0]["name"] == "shell"
+    assert assistant.tool_use[0]["input"] == "pytest"
+    tool = msgs[2]
+    assert tool.role == "tool"
+    assert len(tool.tool_result) == 1
+    assert tool.tool_result[0]["content"] == "5 passed"
+
+
+def test_read_messages_missing_raises(tmp_sessions_dir: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        pi.read_messages("nope", base_dir=str(tmp_sessions_dir / ".pi" / "agent" / "sessions"))
+
+
+def test_read_messages_invalid_uuid(tmp_sessions_dir: Path) -> None:
+    with pytest.raises(ValueError):
+        pi.read_messages("../escape", base_dir=str(tmp_sessions_dir / ".pi" / "agent" / "sessions"))

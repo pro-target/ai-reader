@@ -242,3 +242,64 @@ def test_read_session_missing_raises(tmp_sessions_dir: Path) -> None:
     base = str(tmp_sessions_dir / ".claude" / "projects")
     with pytest.raises(FileNotFoundError):
         claude.read_session("definitely-not-here", base_dir=base)
+
+
+# ---------------------------------------------------------------------------
+# read_messages
+# ---------------------------------------------------------------------------
+
+
+def test_read_messages_basic(fake_claude_session: Path, tmp_sessions_dir: Path) -> None:
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    msgs = claude.read_messages("test-claude-1", base_dir=base)
+    assert len(msgs) == 2
+    assert msgs[0].role == "user"
+    assert msgs[0].text == "Hello, world"
+    assert msgs[0].tool_use == ()
+    assert msgs[1].role == "assistant"
+    assert msgs[1].text == "Hi there!"
+
+
+def test_read_messages_preserves_tool_use_and_result(
+    fake_claude_session_with_tools: Path, tmp_sessions_dir: Path
+) -> None:
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    msgs = claude.read_messages("claude-tools-1", base_dir=base)
+    assert len(msgs) == 3
+
+    assistant = msgs[1]
+    assert assistant.role == "assistant"
+    assert assistant.text == "I'll run them now."
+    assert len(assistant.tool_use) == 1
+    tu = assistant.tool_use[0]
+    assert tu["name"] == "Bash"
+    # input dict serialized to JSON string
+    assert '"pytest"' in tu["input"]
+
+    user_result = msgs[2]
+    assert user_result.role == "user"
+    assert len(user_result.tool_result) == 1
+    assert user_result.tool_result[0]["content"] == "5 passed"
+
+
+def test_read_messages_missing_raises(tmp_sessions_dir: Path) -> None:
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    with pytest.raises(FileNotFoundError):
+        claude.read_messages("nope", base_dir=base)
+
+
+def test_read_messages_invalid_uuid(tmp_sessions_dir: Path) -> None:
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    with pytest.raises(ValueError):
+        claude.read_messages("../escape", base_dir=base)
+
+
+def test_message_is_frozen(fake_claude_session: Path, tmp_sessions_dir: Path) -> None:
+    """Message is a frozen dataclass — attribute mutation is rejected."""
+    from ai_reader.parsers.models import Message
+
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    msgs = claude.read_messages("test-claude-1", base_dir=base)
+    assert isinstance(msgs[0], Message)
+    with pytest.raises(Exception):
+        msgs[0].role = "tool"  # type: ignore[misc]

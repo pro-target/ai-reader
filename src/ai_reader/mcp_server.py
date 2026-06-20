@@ -15,7 +15,6 @@ protocol — that would corrupt the JSON-RPC stream.
 
 from __future__ import annotations
 
-import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -100,93 +99,13 @@ def _target_agents(agent: Optional[str]) -> List[AgentName]:
     return [_coerce_agent(agent)]
 
 
-def _extract_messages_claude(path: str) -> List[dict[str, Any]]:
-    """Return up to :data:`_MESSAGES_CAP` user/assistant records from a Claude JSONL."""
-    messages: List[dict[str, Any]] = []
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                if len(messages) >= _MESSAGES_CAP:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                rec_type = record.get("type")
-                if rec_type not in ("user", "assistant"):
-                    continue
-                payload = record.get("message") or {}
-                if not isinstance(payload, dict):
-                    continue
-                content = payload.get("content", "")
-                if isinstance(content, list):
-                    chunks: List[str] = []
-                    for part in content:
-                        if isinstance(part, dict):
-                            text = part.get("text", "")
-                            if isinstance(text, str) and text:
-                                chunks.append(text)
-                    text_value = "\n".join(chunks)
-                elif isinstance(content, str):
-                    text_value = content
-                else:
-                    text_value = ""
-                messages.append(
-                    {
-                        "role": rec_type,
-                        "content": text_value,
-                    }
-                )
-    except OSError:
-        return messages
-    return messages
-
-
-def _extract_messages_codex(path: str) -> List[dict[str, Any]]:
-    """Return up to :data:`_MESSAGES_CAP` user/assistant records from a Codex rollout."""
-    messages: List[dict[str, Any]] = []
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                if len(messages) >= _MESSAGES_CAP:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                if record.get("type") != "response_item":
-                    continue
-                payload = record.get("payload") or {}
-                if not isinstance(payload, dict):
-                    continue
-                if payload.get("type") != "message":
-                    continue
-                role = payload.get("role")
-                if role not in ("user", "assistant"):
-                    continue
-                messages.append(
-                    {
-                        "role": role,
-                        "content": _codex_text(payload.get("content", [])),
-                    }
-                )
-    except OSError:
-        return messages
-    return messages
-
-
 def _codex_text(parts: object) -> str:
-    """Concatenate Codex message parts into a single string."""
+    """Concatenate Codex message parts into a single string.
+
+    Kept as a thin helper for backwards compatibility with existing
+    callers/tests; the heavy lifting now lives in
+    :func:`ai_reader.parsers.codex.read_messages`.
+    """
     if isinstance(parts, str):
         return parts
     if not isinstance(parts, list):
@@ -202,7 +121,11 @@ def _codex_text(parts: object) -> str:
 
 
 def _pi_text(parts: object) -> str:
-    """Concatenate Pi text parts, skipping thinking/tool-call blocks."""
+    """Concatenate Pi text parts, skipping thinking/tool-call blocks.
+
+    Kept as a thin helper for backwards compatibility with existing
+    callers/tests.
+    """
     if isinstance(parts, str):
         return parts
     if not isinstance(parts, list):
@@ -219,42 +142,70 @@ def _pi_text(parts: object) -> str:
     return "\n".join(chunks)
 
 
+def _extract_messages_claude(path: str) -> List[dict[str, Any]]:
+    """Return up to :data:`_MESSAGES_CAP` Claude messages as ``{role, content}`` dicts.
+
+    Thin shim over :func:`ai_reader.parsers.claude.read_messages` — the
+    parser now owns the extraction.  Path resolution against the session
+    tree is handled by resolving via the file's parent project directory.
+    """
+    return _messages_from_parser(claude, path)
+
+
+def _extract_messages_codex(path: str) -> List[dict[str, Any]]:
+    """Return up to :data:`_MESSAGES_CAP` Codex messages as ``{role, content}`` dicts."""
+    return _messages_from_parser(codex, path)
+
+
 def _extract_messages_pi(path: str) -> List[dict[str, Any]]:
-    """Return up to :data:`_MESSAGES_CAP` user/assistant records from a Pi JSONL."""
+    """Return up to :data:`_MESSAGES_CAP` Pi messages as ``{role, content}`` dicts."""
+    return _messages_from_parser(pi, path)
+
+
+def _messages_from_parser(parser: Any, path: str) -> List[dict[str, Any]]:
+    """Project a parser's ``read_messages`` output to ``{role, content}`` dicts.
+
+    Reads the file at ``path`` directly through the parser's internal
+    extraction (rather than the uuid-resolved public API) so the mcp
+    helpers keep their original ``path``-in / list-out contract used by
+    the unit tests.  Only ``user`` and ``assistant`` roles are surfaced,
+    matching the historical MCP output; ``tool`` messages (e.g. Pi
+    ``toolResult`` records, Codex function-call outputs) are dropped so
+    the MCP ``read_session`` output shape is unchanged.
+    """
     messages: List[dict[str, Any]] = []
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                if len(messages) >= _MESSAGES_CAP:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict) or record.get("type") != "message":
-                    continue
-                payload = record.get("message") or {}
-                if not isinstance(payload, dict):
-                    continue
-                role = payload.get("role")
-                if role not in ("user", "assistant"):
-                    continue
-                messages.append(
-                    {
-                        "role": role,
-                        "content": _pi_text(payload.get("content", "")),
-                    }
-                )
+        if parser is claude:
+            msgs = claude._extract_messages_from_jsonl(Path(path))
+        elif parser is codex:
+            msgs = codex._extract_messages_from_rollout(Path(path))
+        elif parser is pi:
+            msgs = pi._extract_messages_from_jsonl(Path(path))
+        else:
+            return []
     except OSError:
-        return messages
+        return []
+    for m in msgs:
+        if len(messages) >= _MESSAGES_CAP:
+            break
+        if m.role not in ("user", "assistant"):
+            continue
+        messages.append({"role": m.role, "content": m.text})
     return messages
 
 
 def _extract_messages(session: Session) -> List[dict[str, Any]]:
-    """Best-effort message extraction; capped at :data:`_MESSAGES_CAP`."""
+    """Best-effort message extraction; capped at :data:`_MESSAGES_CAP`.
+
+    Delegates to the owning parser's message extractor (the same code
+    that backs the public ``read_messages`` API) reading from
+    ``session.path``, then projects each :class:`~ai_reader.parsers.models.Message`
+    to a ``{role, content}`` dict.  Only ``user``/``assistant`` roles
+    are surfaced, preserving the historical MCP output shape; ``tool``
+    messages are dropped.  The cap is applied here so MCP output stays
+    bounded; the underlying parser extractor returns the full uncapped
+    list.
+    """
     if session.agent == AgentName.CLAUDE:
         return _extract_messages_claude(session.path)
     if session.agent == AgentName.CODEX:

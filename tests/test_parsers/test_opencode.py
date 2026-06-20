@@ -171,3 +171,44 @@ def test_row_to_session_untitled() -> None:
     assert session.title == "Untitled"
     conn.close()
     path.unlink()
+
+
+# ---------------------------------------------------------------------------
+# read_messages
+# ---------------------------------------------------------------------------
+
+
+def test_read_messages_basic(fake_opencode_db: Path) -> None:
+    """The minimal fixture has no ``data`` column content, so messages are empty."""
+    msgs = opencode.read_messages("test-oc-1", override=str(fake_opencode_db))
+    assert isinstance(msgs, list)
+    # The basic fixture inserts rows without a ``data`` blob; the extractor
+    # skips rows with NULL/empty data.
+    assert msgs == []
+
+
+def test_read_messages_preserves_tool_calls(fake_opencode_db_with_tools: Path) -> None:
+    msgs = opencode.read_messages("oc-tools-1", override=str(fake_opencode_db_with_tools))
+    assert len(msgs) == 3
+    assert msgs[0].role == "user"
+    assert msgs[0].text == "run tests"
+    assistant = msgs[1]
+    assert assistant.role == "assistant"
+    assert assistant.text == "okay"
+    assert len(assistant.tool_use) == 1
+    assert assistant.tool_use[0]["name"] == "shell"
+    assert assistant.tool_use[0]["input"] == "pytest"
+    tool = msgs[2]
+    assert tool.role == "tool"
+    assert len(tool.tool_result) == 1
+    assert tool.tool_result[0]["content"] == "5 passed"
+
+
+def test_read_messages_missing_raises(fake_opencode_db: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        opencode.read_messages("nope", override=str(fake_opencode_db))
+
+
+def test_read_messages_invalid_uuid(fake_opencode_db: Path) -> None:
+    with pytest.raises(ValueError):
+        opencode.read_messages("../escape", override=str(fake_opencode_db))

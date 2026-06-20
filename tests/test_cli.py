@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -338,3 +339,200 @@ def test_cli_inproc_build_parser() -> None:
     for cmd in ("list", "search"):
         with pytest.raises(SystemExit):
             parser.parse_args([cmd, "--agent", "mystery"])
+
+
+# ---------------------------------------------------------------------------
+# Result-limiting / date flags (--limit, --days, --from-date, --to-date, --all)
+# ---------------------------------------------------------------------------
+
+
+def _make_claude_session(
+    home: Path, session_id: str, when: str, title: str = "session"
+) -> str:
+    """Write a minimal Claude session JSONL into ``home`` and return its uuid."""
+    import json as _json
+
+    jsonl = home / ".claude" / "projects" / "proj-x" / f"{session_id}.jsonl"
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "type": "user",
+        "message": {"role": "user", "content": title},
+        "timestamp": when,
+        "sessionId": session_id,
+    }
+    with jsonl.open("w", encoding="utf-8") as fh:
+        fh.write(_json.dumps(record, ensure_ascii=False))
+        fh.write("\n")
+    return session_id
+
+
+def test_cli_list_limit_truncates(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--limit N`` truncates the table to at most N rows."""
+    for n in range(5):
+        _make_claude_session(
+            tmp_sessions_dir,
+            f"lim-{n}",
+            "2026-06-14T10:00:00Z",
+            title=f"row {n}",
+        )
+    rc, out, err = _run_inproc(
+        ["list", "--agent", "claude", "--limit", "2", "--json"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    assert len(payload) == 2
+
+
+def test_cli_list_days_filter(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--days`` keeps only recent sessions (vs datetime.now())."""
+    now = datetime.now()
+    recent_iso = now.strftime("%Y-%m-%dT10:00:00Z")
+    old = now - timedelta(days=30)
+    old_iso = old.strftime("%Y-%m-%dT10:00:00Z")
+    _make_claude_session(tmp_sessions_dir, "recent-1", recent_iso, title="recent")
+    _make_claude_session(tmp_sessions_dir, "old-1", old_iso, title="old")
+    rc, out, err = _run_inproc(
+        ["list", "--agent", "claude", "--days", "7", "--json"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    uuids = [item["uuid"] for item in payload]
+    assert "recent-1" in uuids
+    assert "old-1" not in uuids
+
+
+def test_cli_list_from_to_date_filter(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--from-date``/``--to-date`` keep sessions within the window."""
+    _make_claude_session(
+        tmp_sessions_dir, "before-1", "2026-05-01T10:00:00Z", title="before"
+    )
+    _make_claude_session(
+        tmp_sessions_dir, "inside-1", "2026-06-14T10:00:00Z", title="inside"
+    )
+    _make_claude_session(
+        tmp_sessions_dir, "after-1", "2026-07-01T10:00:00Z", title="after"
+    )
+    rc, out, err = _run_inproc(
+        [
+            "list",
+            "--agent",
+            "claude",
+            "--from-date",
+            "2026-06-01",
+            "--to-date",
+            "2026-06-30",
+            "--json",
+        ],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    uuids = [item["uuid"] for item in payload]
+    assert "inside-1" in uuids
+    assert "before-1" not in uuids
+    assert "after-1" not in uuids
+
+
+def test_cli_list_bad_date_exits_1(
+    tmp_sessions_dir: Path,
+) -> None:
+    """Invalid ``--from-date`` -> exit 1 with a stderr message."""
+    rc, out, err = _run_inproc(
+        ["list", "--agent", "claude", "--from-date", "not-a-date"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 1
+    assert "invalid --from-date" in err.lower()
+
+
+def test_cli_list_all_flag_accepted(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--all`` is accepted and behaves as a no-op."""
+    _make_claude_session(
+        tmp_sessions_dir, "all-1", "2026-06-14T10:00:00Z", title="all"
+    )
+    rc, out, err = _run_inproc(
+        ["list", "--agent", "claude", "--all", "--json"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    assert len(payload) == 1
+
+
+def test_cli_search_limit_and_days(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--limit``/``--days`` apply to search results too."""
+    now = datetime.now()
+    for n in range(3):
+        iso = now.strftime("%Y-%m-%dT10:00:00Z")
+        _make_claude_session(
+            tmp_sessions_dir, f"src-{n}", iso, title="searchme"
+        )
+    rc, out, err = _run_inproc(
+        ["search", "searchme", "--agent", "claude", "--limit", "1", "--json"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    assert len(json.loads(out)) == 1
+
+
+# ---------------------------------------------------------------------------
+# read --messages
+# ---------------------------------------------------------------------------
+
+
+def test_cli_read_messages_human(
+    fake_claude_session_with_tools: Path,
+    tmp_sessions_dir: Path,
+) -> None:
+    """``read --messages`` dumps message text + tool_use names."""
+    uuid = fake_claude_session_with_tools.stem
+    rc, out, err = _run_inproc(
+        ["read", "--agent", "claude", uuid, "--messages"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    assert uuid in out
+    assert "[tool_use: Bash]" in out
+    assert "Run the tests" in out
+
+
+def test_cli_read_messages_json(
+    fake_claude_session_with_tools: Path,
+    tmp_sessions_dir: Path,
+) -> None:
+    """``read --json --messages`` embeds a ``messages`` list with tool names."""
+    uuid = fake_claude_session_with_tools.stem
+    rc, out, err = _run_inproc(
+        ["read", "--agent", "claude", uuid, "--messages", "--json"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    assert payload["uuid"] == uuid
+    msgs = payload["messages"]
+    assert isinstance(msgs, list)
+    assert any("Bash" in (m["tool_use"]) for m in msgs)
+
+
+def test_cli_read_messages_missing_session(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``read --messages`` on a missing uuid still exits 3 (metadata path)."""
+    rc, out, err = _run_inproc(
+        ["read", "--agent", "claude", "no-such-session", "--messages"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 3
+    assert "not found" in err.lower()

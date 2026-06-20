@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from .models import AgentName, Session
+from .models import AgentName, Message, Session
 
 
 _TITLE_MAX_LEN = 100
@@ -252,6 +252,103 @@ def read_session(uuid: str, base_dir: Optional[str] = None) -> Session:
     """
     _, session = _find_session_file(uuid, base_dir)
     return session
+
+
+
+def _codex_message_text(payload: dict) -> str:
+    """Concatenate the text parts of a Codex message payload."""
+    return _extract_text_from_parts(payload.get("content", []))
+
+
+def _extract_messages_from_rollout(path: Path) -> List[Message]:
+    """Read a Codex rollout JSONL into structured :class:`Message` objects.
+
+    Codex rollouts store ``response_item`` records.  ``message`` payloads
+    become user/assistant :class:`Message` objects.  ``function_call``
+    payloads (and the ``local_shell_call`` family) become assistant
+    ``tool_use`` entries; ``function_call_output`` payloads become
+    ``tool`` messages with a ``tool_result`` entry.  Other record types
+    are skipped.
+
+    Lines that are not valid JSON are silently skipped; an
+    :class:`OSError` returns whatever was collected so far.
+    """
+    messages: List[Message] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if record.get("type") != "response_item":
+                    continue
+                payload = record.get("payload") or {}
+                if not isinstance(payload, dict):
+                    continue
+                ptype = payload.get("type")
+                if ptype == "message":
+                    role = payload.get("role")
+                    if role not in ("user", "assistant"):
+                        continue
+                    text = _codex_message_text(payload)
+                    messages.append(Message(role=role, text=text))
+                elif ptype in ("function_call", "local_shell_call"):
+                    name = payload.get("name") or ptype
+                    arguments = payload.get("arguments", "")
+                    if isinstance(arguments, str):
+                        input_str = arguments
+                    else:
+                        try:
+                            input_str = json.dumps(arguments, ensure_ascii=False)
+                        except (TypeError, ValueError):
+                            input_str = str(arguments)
+                    messages.append(
+                        Message(
+                            role="assistant",
+                            text="",
+                            tool_use=({"name": name, "input": input_str},),
+                        )
+                    )
+                elif ptype in ("function_call_output", "local_shell_call_output"):
+                    output = payload.get("output", "")
+                    if not isinstance(output, str):
+                        try:
+                            output = json.dumps(output, ensure_ascii=False)
+                        except (TypeError, ValueError):
+                            output = str(output)
+                    messages.append(
+                        Message(
+                            role="tool",
+                            text="",
+                            tool_result=({"content": output},),
+                        )
+                    )
+    except OSError:
+        return messages
+    return messages
+
+
+def read_messages(
+    uuid: str, base_dir: Optional[str] = None
+) -> List[Message]:
+    """Return the full message list for a Codex session.
+
+    Reuses :func:`read_session` for path resolution.  Function/shell
+    calls and their outputs are preserved on the returned
+    :class:`Message` objects.
+
+    Raises:
+        FileNotFoundError: the session does not exist.
+        ValueError: ``uuid`` is malformed.
+    """
+    session = read_session(uuid, base_dir)
+    return _extract_messages_from_rollout(Path(session.path))
 
 
 def search(query: str, base_dir: Optional[str] = None) -> List[Session]:

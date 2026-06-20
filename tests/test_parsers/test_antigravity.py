@@ -158,3 +158,41 @@ def test_resolve_brain_roots_uses_ai_reader_home(tmp_path: Path) -> None:
     # We only assert the function returns a list (real shape depends on
     # the fixture tree, which always creates antigravity dirs).
     assert isinstance(roots, list)
+
+
+# ---------------------------------------------------------------------------
+# read_messages
+# ---------------------------------------------------------------------------
+
+
+def test_read_messages_from_overview(fake_antigravity_brain: Path) -> None:
+    """read_messages falls back to overview.txt when no transcript exists."""
+    base = str(fake_antigravity_brain.parent)
+    msgs = antigravity.read_messages("test-ag-1", base_dir=base)
+    assert len(msgs) == 2
+    assert msgs[0].role == "user"
+    assert msgs[0].text == "<USER_REQUEST>Set up the lab</USER_REQUEST>"
+    assert msgs[1].role == "assistant"
+    assert msgs[1].text == "ok"
+
+
+def test_read_messages_from_transcript(
+    fake_antigravity_brain_with_transcript: Path,
+) -> None:
+    base = str(fake_antigravity_brain_with_transcript.parent)
+    msgs = antigravity.read_messages("ag-tools-1", base_dir=base)
+    assert len(msgs) == 2
+    assert msgs[0].role == "user"
+    assert msgs[0].text == "Set up the lab"
+    assert msgs[1].role == "assistant"
+    assert msgs[1].text == "Lab is ready"
+
+
+def test_read_messages_missing_raises(tmp_sessions_dir: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        antigravity.read_messages("nope", base_dir=str(tmp_sessions_dir))
+
+
+def test_read_messages_invalid_uuid(tmp_sessions_dir: Path) -> None:
+    with pytest.raises(ValueError):
+        antigravity.read_messages("../escape", base_dir="anything")
