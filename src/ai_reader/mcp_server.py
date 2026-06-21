@@ -4,7 +4,9 @@ Exposes three tools over the Model Context Protocol:
 
 * :func:`list_sessions`  — enumerate sessions, optionally filtered by agent.
 * :func:`read_session`   — load a single session by ``uuid`` and ``agent``.
-* :func:`search_sessions` — case-insensitive title substring search.
+* :func:`search_sessions` — case-insensitive search across title and/or
+  message bodies with AND/OR/NOT operators and Google-style ``-term``
+  negative prefixes.
 
 Errors are returned as dicts (never raised) so the MCP client can
 surface them in a structured way.
@@ -15,6 +17,7 @@ protocol — that would corrupt the JSON-RPC stream.
 
 from __future__ import annotations
 
+import shlex
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -307,35 +310,226 @@ def read_session(
 
 
 @mcp.tool()
-def search_sessions(query: str, agent: Optional[str] = None) -> List[dict[str, Any]]:
-    """Case-insensitive title substring search across sessions.
+def search_sessions(
+    query: str,
+    agent: Optional[str] = None,
+    scope: str = "title",
+    operator: str = "AND",
+    limit: int = 50,
+) -> List[dict[str, Any]]:
+    """Case-insensitive search across sessions.
 
     Args:
-        query: Non-empty search string.
-        agent: Optional agent filter; one of ``claude``, ``codex``,
-            ``opencode``, ``antigravity``, ``pi``.
+        query: Search string. Supports:
+            * Bare words: ``pwa manifest`` (AND default)
+            * Quoted phrases: ``"exact phrase"``
+            * Negative prefix: ``-claude`` (Google-style, always excluded)
+        agent: Optional agent filter (claude/codex/opencode/antigravity/pi).
+        scope: Where to look.
+            * ``"title"`` — only ``session.title`` (default, backward-compat)
+            * ``"body"``  — message text + ``tool_use[*].input`` +
+              ``tool_result[*].content``
+            * ``"all"``   — title OR body
+        operator: How to combine positive terms.
+            * ``"AND"`` — all positive terms must appear (default)
+            * ``"OR"``  — at least one positive term must appear
+            * ``"NOT"`` — no term (positive or negative) may appear
+            Negative ``-term`` prefixes are always excluded regardless
+            of operator.
+        limit: Maximum number of results.  0 or negative = no limit.
 
     Returns:
-        A list of matching session summaries.  An empty list means
-        nothing matched (or ``query`` was empty).
+        A list of session summaries. When ``scope`` is ``"body"`` or
+        ``"all"`` and a match is found, the summary includes a
+        ``"snippet"`` field with the first matching message excerpt
+        (up to 200 chars).
+
+    Errors are returned as ``{"error": ..., "message": ...}`` dicts in
+    the list (matches the existing convention).
     """
     needle = (query or "").strip()
     if not needle:
         return []
+
+    if scope not in ("title", "body", "all"):
+        return [{
+            "error": "invalid_argument",
+            "message": f"unknown scope {scope!r}; expected title, body, or all",
+        }]
+
+    op_upper = (operator or "AND").upper()
+    if op_upper not in ("AND", "OR", "NOT"):
+        return [{
+            "error": "invalid_argument",
+            "message": f"unknown operator {operator!r}; expected AND, OR, or NOT",
+        }]
+
+    if not isinstance(limit, int) or limit < 0:
+        return [{
+            "error": "invalid_argument",
+            "message": f"limit must be a non-negative integer, got {limit!r}",
+        }]
 
     try:
         targets = _target_agents(agent)
     except ValueError as exc:
         return [{"error": "invalid_argument", "message": str(exc)}]
 
-    lowered = needle.lower()
+    positive, negative = _parse_query(needle)
     summaries: List[dict[str, Any]] = []
+
     for agent_name in targets:
         parser = _PARSERS[agent_name]
-        for session in parser.search(needle):
-            if lowered in session.title.lower():
-                summaries.append(_session_summary(session))
+        for session in parser.list_sessions():
+            matched = False
+            snippet_text = ""
+
+            if scope == "title":
+                title_lc = session.title.lower()
+                if op_upper == "AND":
+                    matched = all(t in title_lc for t in positive) and all(
+                        t not in title_lc for t in negative
+                    )
+                elif op_upper == "OR":
+                    matched = bool(positive) and any(
+                        t in title_lc for t in positive
+                    ) and all(t not in title_lc for t in negative)
+                else:
+                    matched = all(
+                        t not in title_lc for t in (positive + negative)
+                    )
+            elif scope == "body":
+                try:
+                    messages = parser.read_messages(session.uuid)
+                except (FileNotFoundError, ValueError, OSError):
+                    messages = []
+                haystack = _build_haystack(messages)
+                matched = _match(haystack, positive, negative, op_upper)
+                if matched and positive:
+                    snippet_text = _extract_snippet(haystack, positive)
+            else:
+                title_lc = session.title.lower()
+                if op_upper == "AND":
+                    in_title = all(t in title_lc for t in positive)
+                elif op_upper == "OR":
+                    in_title = bool(positive) and any(
+                        t in title_lc for t in positive
+                    )
+                else:
+                    in_title = all(
+                        t not in title_lc for t in (positive + negative)
+                    )
+                try:
+                    messages = parser.read_messages(session.uuid)
+                except (FileNotFoundError, ValueError, OSError):
+                    messages = []
+                haystack = _build_haystack(messages)
+                in_body = _match(haystack, positive, negative, op_upper)
+                matched = in_title or in_body
+                if matched:
+                    if in_body and positive:
+                        snippet_text = _extract_snippet(haystack, positive)
+                    elif in_title and positive:
+                        snippet_text = _extract_snippet(title_lc, positive)
+
+            if not matched:
+                continue
+            summary = _session_summary(session)
+            if snippet_text:
+                summary["snippet"] = snippet_text
+            summaries.append(summary)
+            if limit and len(summaries) >= limit:
+                return summaries
     return summaries
+
+
+def _parse_query(query: str) -> tuple[list[str], list[str]]:
+    """Split ``query`` into (positive_terms, negative_terms).
+
+    Honors quoted phrases via ``shlex.split``. A leading ``-`` marks a
+    term as negative. All terms are lowercased. Empty tokens are dropped.
+    """
+    tokens = shlex.split(query or "")
+    positive: list[str] = []
+    negative: list[str] = []
+    for tok in tokens:
+        if not tok:
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            negative.append(tok[1:].lower())
+        else:
+            positive.append(tok.lower())
+    return positive, negative
+
+
+def _build_haystack(messages: Sequence[Any]) -> str:
+    """Concatenate message text + tool_use inputs + tool_result contents.
+
+    Lowercased once on return. Includes content that lives in tool calls
+    and tool results, not just plain text — this is what makes the
+    full-text search actually useful for finding references buried in
+    Bash/file/etc. invocations.
+    """
+    chunks: List[str] = []
+    for m in messages:
+        text = getattr(m, "text", "")
+        if isinstance(text, str) and text:
+            chunks.append(text)
+        for tool in getattr(m, "tool_use", ()) or ():
+            if isinstance(tool, dict):
+                inp = tool.get("input", "")
+                if inp:
+                    chunks.append(str(inp))
+        for res in getattr(m, "tool_result", ()) or ():
+            if isinstance(res, dict):
+                content = res.get("content", "")
+                if content:
+                    chunks.append(str(content))
+    return "\n".join(chunks).lower()
+
+
+def _match(
+    haystack: str,
+    positive: list[str],
+    negative: list[str],
+    operator: str,
+) -> bool:
+    """Evaluate the operator+negative-filter predicate against haystack."""
+    op = (operator or "AND").upper()
+    if op == "NOT":
+        return all(term not in haystack for term in (positive + negative))
+    if op == "AND":
+        return all(term in haystack for term in positive) and all(
+            term not in haystack for term in negative
+        )
+    if op == "OR":
+        if not positive:
+            return False
+        return any(term in haystack for term in positive) and all(
+            term not in haystack for term in negative
+        )
+    raise ValueError(f"unknown operator {operator!r}; expected AND, OR, or NOT")
+
+
+def _extract_snippet(haystack: str, terms: list[str], max_len: int = 200) -> str:
+    """Return a short excerpt around the first match of any term.
+
+    Lowercased haystack, term matching is also lowercased. Adds leading/
+    trailing ``...`` when the excerpt is clipped.
+    """
+    for term in terms:
+        idx = haystack.find(term)
+        if idx < 0:
+            continue
+        start = max(0, idx - 60)
+        end = min(len(haystack), idx + max(0, len(term)) + 140)
+        snippet = haystack[start:end].strip()
+        if start > 0 and not snippet.startswith("..."):
+            snippet = "..." + snippet
+        if end < len(haystack) and not snippet.endswith("..."):
+            snippet = snippet + "..."
+        return snippet[:max_len]
+    return ""
 
 
 def main() -> int:

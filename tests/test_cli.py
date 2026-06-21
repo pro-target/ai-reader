@@ -634,3 +634,338 @@ def test_cli_read_messages_missing_session(
     )
     assert rc == 3
     assert "not found" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# search — new scope/operator flags (delegated to mcp_server.search_sessions)
+# ---------------------------------------------------------------------------
+
+
+def _write_claude_session_with_body(
+    home: Path,
+    uuid: str,
+    body_lines: list[str],
+    title: str = "",
+) -> None:
+    """Write a Claude session whose message bodies carry ``body_lines``.
+
+    The first line is the user message; alternating roles for the rest.
+    The title is the first user message (Claude parser precedence).
+    """
+    path = home / ".claude" / "projects" / "proj-a" / f"{uuid}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    records: list[dict] = []
+    for i, line in enumerate(body_lines):
+        role = "user" if i % 2 == 0 else "assistant"
+        records.append(
+            {
+                "type": role,
+                "message": {"role": role, "content": line},
+                "timestamp": f"2026-06-14T10:00:0{i}Z",
+                "sessionId": uuid,
+            }
+        )
+    with path.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def test_cli_search_scope_body_finds_session(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--scope body`` finds a session whose message text matches."""
+    _write_claude_session_with_body(
+        tmp_sessions_dir,
+        "ses-pwa-1",
+        ["How do I add a pwa manifest to my project?"],
+        title="pwa manifest help",
+    )
+    rc, out, err = _run_inproc(
+        [
+            "search",
+            "pwa manifest",
+            "--scope",
+            "body",
+            "--agent",
+            "claude",
+            "--json",
+        ],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    uuids = [item["uuid"] for item in payload]
+    assert "ses-pwa-1" in uuids
+
+
+def test_cli_search_scope_body_no_results(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--scope body`` with no body match -> stderr message, exit 0."""
+    _write_claude_session_with_body(
+        tmp_sessions_dir, "ses-empty", ["just plain text"]
+    )
+    rc, out, err = _run_inproc(
+        [
+            "search",
+            "xyzzy-no-such-token",
+            "--scope",
+            "body",
+            "--agent",
+            "claude",
+        ],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    assert "no sessions match" in err.lower()
+
+
+def test_cli_search_operator_or(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--operator or`` matches if ANY term appears in the body."""
+    _write_claude_session_with_body(
+        tmp_sessions_dir, "ses-or-1", ["foo bar", "ok"]
+    )
+    rc, out, err = _run_inproc(
+        [
+            "search",
+            "foo baz",
+            "--operator",
+            "or",
+            "--scope",
+            "body",
+            "--agent",
+            "claude",
+            "--json",
+        ],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    uuids = [item["uuid"] for item in payload]
+    assert "ses-or-1" in uuids
+
+
+def test_cli_search_operator_not(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--operator not`` excludes sessions whose body contains the term."""
+    _write_claude_session_with_body(
+        tmp_sessions_dir, "ses-not-1", ["foo and more"]
+    )
+    rc, out, err = _run_inproc(
+        [
+            "search",
+            "foo",
+            "--operator",
+            "not",
+            "--scope",
+            "body",
+            "--agent",
+            "claude",
+            "--json",
+        ],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    uuids = [item["uuid"] for item in payload]
+    assert "ses-not-1" not in uuids
+
+
+def test_cli_search_negative_prefix(
+    tmp_sessions_dir: Path,
+) -> None:
+    """A ``-term`` in the query always excludes, regardless of operator."""
+    _write_claude_session_with_body(
+        tmp_sessions_dir, "ses-neg-has", ["foo bar"]
+    )
+    _write_claude_session_with_body(
+        tmp_sessions_dir, "ses-neg-miss", ["foo baz"]
+    )
+    rc, out, err = _run_inproc(
+        [
+            "search",
+            "foo -bar",
+            "--scope",
+            "body",
+            "--agent",
+            "claude",
+            "--json",
+        ],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    uuids = [item["uuid"] for item in payload]
+    assert "ses-neg-has" not in uuids
+    assert "ses-neg-miss" in uuids
+
+
+def test_cli_search_limit_body(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--limit`` truncates body-search results."""
+    for n in range(5):
+        _write_claude_session_with_body(
+            tmp_sessions_dir,
+            f"ses-lim-{n}",
+            ["hello world message"],
+        )
+    rc, out, err = _run_inproc(
+        [
+            "search",
+            "hello",
+            "--scope",
+            "body",
+            "--agent",
+            "claude",
+            "--limit",
+            "2",
+            "--json",
+        ],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    assert len(payload) <= 2
+
+
+def test_cli_search_invalid_scope(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--scope bogus`` -> exit 1 with a stderr message."""
+    rc, out, err = _run_inproc(
+        ["search", "anything", "--scope", "bogus", "--agent", "claude"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 1
+    assert "unknown --scope" in err.lower()
+
+
+def test_cli_search_invalid_operator(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--operator xor`` -> exit 1."""
+    rc, out, err = _run_inproc(
+        ["search", "anything", "--operator", "xor", "--agent", "claude"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 1
+    assert "unknown --operator" in err.lower()
+
+
+def test_cli_search_invalid_limit(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--limit -1`` -> exit 1."""
+    rc, out, err = _run_inproc(
+        ["search", "anything", "--limit", "-1", "--agent", "claude"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 1
+    assert "--limit" in err.lower()
+
+
+def test_cli_search_body_with_date_filter(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--scope body`` and ``--days`` combine: old session excluded, recent kept."""
+    now = datetime.now()
+    old_iso = (now - timedelta(days=30)).strftime("%Y-%m-%dT10:00:00Z")
+    recent_iso = now.strftime("%Y-%m-%dT10:00:00Z")
+    _write_claude_session_at(
+        tmp_sessions_dir, "ses-old", old_iso, ["deploy auth token"]
+    )
+    _write_claude_session_at(
+        tmp_sessions_dir, "ses-recent", recent_iso, ["deploy auth token"]
+    )
+    rc, out, err = _run_inproc(
+        [
+            "search",
+            "deploy",
+            "--scope",
+            "body",
+            "--days",
+            "7",
+            "--agent",
+            "claude",
+            "--json",
+        ],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    uuids = [item["uuid"] for item in payload]
+    assert "ses-old" not in uuids
+    assert "ses-recent" in uuids
+
+
+def _write_claude_session_at(
+    home: Path, uuid: str, timestamp: str, body_lines: list[str]
+) -> None:
+    """Like :func:`_write_claude_session_with_body` but with a custom timestamp."""
+    path = home / ".claude" / "projects" / "proj-a" / f"{uuid}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    records: list[dict] = []
+    for i, line in enumerate(body_lines):
+        role = "user" if i % 2 == 0 else "assistant"
+        records.append(
+            {
+                "type": role,
+                "message": {"role": role, "content": line},
+                "timestamp": timestamp,
+                "sessionId": uuid,
+            }
+        )
+    with path.open("w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def test_cli_search_backward_compat(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``search QUERY`` with no new flags still works (title-only)."""
+    _make_claude_session(
+        tmp_sessions_dir,
+        "ses-compat-1",
+        "2026-06-14T10:00:00Z",
+        title="claude pair programming",
+    )
+    rc, out, err = _run_inproc(
+        ["search", "claude", "--agent", "claude", "--json"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    uuids = [item["uuid"] for item in payload]
+    assert "ses-compat-1" in uuids
+
+
+def test_cli_search_short_op_alias(
+    tmp_sessions_dir: Path,
+) -> None:
+    """``--op`` is a short alias for ``--operator``."""
+    _write_claude_session_with_body(
+        tmp_sessions_dir, "ses-alias-1", ["alpha gamma", "ok"]
+    )
+    rc, out, err = _run_inproc(
+        [
+            "search",
+            "alpha delta",
+            "--op",
+            "or",
+            "--scope",
+            "body",
+            "--agent",
+            "claude",
+            "--json",
+        ],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    uuids = [item["uuid"] for item in payload]
+    assert "ses-alias-1" in uuids

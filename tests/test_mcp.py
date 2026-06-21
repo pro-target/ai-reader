@@ -23,11 +23,15 @@ import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from ai_reader.mcp_server import (
+    _build_haystack,
     _codex_text,
     _coerce_agent,
     _extract_messages,
+    _extract_snippet,
     _iso,
+    _match,
     _MESSAGES_CAP,
+    _parse_query,
     _pi_text,
     _session_summary,
     _target_agents,
@@ -669,3 +673,368 @@ def test_messages_cap_constant_unchanged() -> None:
     from ai_reader.mcp_server import _MESSAGES_CAP
 
     assert _MESSAGES_CAP == 100
+
+
+# ---------------------------------------------------------------------------
+# search_sessions: extended API (scope/operator/limit, body search)
+# ---------------------------------------------------------------------------
+
+
+def _write_claude_body_session(
+    tmp_sessions_dir: Path,
+    uuid: str,
+    user_text: str,
+    assistant_blocks: list | None = None,
+    title: str = "Body search test",
+) -> None:
+    """Write a Claude JSONL session with a known user message + optional tool calls.
+
+    ``assistant_blocks`` lets the caller inject structured content
+    (tool_use, text, etc.) into the assistant turn; defaults to a plain
+    text reply.  The session gets an ``ai-title`` event so the resolved
+    title is deterministic regardless of the user text.
+    """
+    records: list[dict] = [
+        {
+            "type": "ai-title",
+            "aiTitle": title,
+            "timestamp": "2026-06-14T09:59:59Z",
+            "sessionId": uuid,
+        },
+        {
+            "type": "user",
+            "message": {"role": "user", "content": user_text},
+            "timestamp": "2026-06-14T10:00:00Z",
+            "sessionId": uuid,
+        },
+    ]
+    if assistant_blocks is None:
+        assistant_blocks = [
+            {"type": "text", "text": "ok"},
+        ]
+    records.append(
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": assistant_blocks},
+            "timestamp": "2026-06-14T10:00:05Z",
+            "sessionId": uuid,
+        }
+    )
+    jsonl = tmp_sessions_dir / ".claude" / "projects" / "proj-x" / f"{uuid}.jsonl"
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    jsonl.write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+    )
+
+
+def test_search_sessions_backward_compat_title_only(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default args (scope=title, operator=AND) preserve the historical
+    title-substring behaviour and do not surface a ``snippet`` key."""
+    _write_claude_body_session(
+        tmp_sessions_dir=tmp_sessions_dir,
+        uuid="bcc-1",
+        user_text="hello world",
+        title="claude indexer notes",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = search_sessions("claude")
+    assert isinstance(result, list)
+    assert result, "expected at least one match against the title"
+    for s in result:
+        assert "snippet" not in s
+        assert "claude" in s["title"].lower()
+
+
+def test_search_sessions_body_and_match(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """scope=body + AND (default) finds a session whose message text
+    contains both required terms, and surfaces a ``snippet``."""
+    _write_claude_body_session(
+        tmp_sessions_dir=tmp_sessions_dir,
+        uuid="body-and-1",
+        user_text="please add a pwa manifest for the dashboard",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = search_sessions(
+        "pwa manifest", agent="claude", scope="body"
+    )
+    assert isinstance(result, list)
+    assert result, "expected body match"
+    matched = [s for s in result if s["uuid"] == "body-and-1"]
+    assert matched, "the synthesized session must be in the results"
+    assert "snippet" in matched[0]
+    assert "pwa manifest" in matched[0]["snippet"].lower()
+
+
+def test_search_sessions_body_or_match(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """scope=body + OR matches when at least one positive term appears."""
+    _write_claude_body_session(
+        tmp_sessions_dir=tmp_sessions_dir,
+        uuid="body-or-1",
+        user_text="please add a pwa manifest for the dashboard",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = search_sessions(
+        "pwa ipsum",
+        agent="claude",
+        scope="body",
+        operator="OR",
+    )
+    matched = [s for s in result if s["uuid"] == "body-or-1"]
+    assert matched, "OR: only pwa appears, must still match"
+
+
+def test_search_sessions_body_not_match(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """operator=NOT excludes any session containing the term."""
+    _write_claude_body_session(
+        tmp_sessions_dir=tmp_sessions_dir,
+        uuid="body-not-1",
+        user_text="please add a pwa manifest for the dashboard",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = search_sessions(
+        "pwa", agent="claude", scope="body", operator="NOT"
+    )
+    matched = [s for s in result if s["uuid"] == "body-not-1"]
+    assert not matched, "NOT: pwa is in the body, must not match"
+
+
+def test_search_sessions_body_negative_prefix(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Google-style ``-term`` excludes a session when the negative term
+    appears in the body, regardless of positive matches."""
+    _write_claude_body_session(
+        tmp_sessions_dir=tmp_sessions_dir,
+        uuid="body-neg-1",
+        user_text="please add a pwa manifest for the dashboard",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    excluded = search_sessions(
+        "pwa -manifest", agent="claude", scope="body"
+    )
+    assert not [s for s in excluded if s["uuid"] == "body-neg-1"], (
+        "-manifest must exclude a session that contains manifest"
+    )
+    included = search_sessions(
+        "pwa -claude", agent="claude", scope="body"
+    )
+    assert [s for s in included if s["uuid"] == "body-neg-1"], (
+        "-claude must NOT exclude a session that has no 'claude' in body"
+    )
+
+
+def test_search_sessions_body_quoted_phrase(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Quoted phrases are matched as a single literal term."""
+    _write_claude_body_session(
+        tmp_sessions_dir=tmp_sessions_dir,
+        uuid="body-quote-1",
+        user_text="the secret token is foo bar baz and you must keep it safe",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = search_sessions('"foo bar"', agent="claude", scope="body")
+    matched = [s for s in result if s["uuid"] == "body-quote-1"]
+    assert matched, "quoted phrase 'foo bar' must be located as a single term"
+
+
+def test_search_sessions_body_tool_use_match(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Body search descends into ``tool_use[*].input`` so invocations
+    buried in tool calls are discoverable."""
+    _write_claude_body_session(
+        tmp_sessions_dir=tmp_sessions_dir,
+        uuid="body-tool-1",
+        user_text="run the tests please",
+        assistant_blocks=[
+            {"type": "text", "text": "Running."},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "pytest"}},
+        ],
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = search_sessions("pytest", agent="claude", scope="body")
+    matched = [s for s in result if s["uuid"] == "body-tool-1"]
+    assert matched, "tool_use input must be searchable"
+    assert "snippet" in matched[0]
+
+
+def test_search_sessions_limit(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``limit`` caps the number of results returned."""
+    # Synthesize 5 distinct Claude sessions; only the title differs
+    # because body+title are also matched by 'limitcap'.
+    for i in range(5):
+        _write_claude_body_session(
+            tmp_sessions_dir=tmp_sessions_dir,
+            uuid=f"limitcap-{i}",
+            user_text=f"user {i} text",
+            title=f"limitcap session {i}",
+        )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = search_sessions("limitcap", agent="claude", limit=2)
+    assert len(result) <= 2
+
+
+def test_search_sessions_invalid_scope() -> None:
+    result = search_sessions("x", scope="bogus")
+    assert isinstance(result, list)
+    assert result and result[0].get("error") == "invalid_argument"
+    assert "scope" in result[0]["message"].lower()
+
+
+def test_search_sessions_invalid_operator() -> None:
+    result = search_sessions("x", operator="XOR")
+    assert isinstance(result, list)
+    assert result and result[0].get("error") == "invalid_argument"
+    assert "operator" in result[0]["message"].lower()
+
+
+def test_search_sessions_invalid_limit() -> None:
+    result = search_sessions("x", limit=-1)
+    assert isinstance(result, list)
+    assert result and result[0].get("error") == "invalid_argument"
+    assert "limit" in result[0]["message"].lower()
+
+
+def test_search_sessions_snippet_truncated(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A long body yields a ``snippet`` of at most 200 characters."""
+    filler = "x" * 500
+    _write_claude_body_session(
+        tmp_sessions_dir=tmp_sessions_dir,
+        uuid="body-long-1",
+        user_text=f"the {filler} needle {filler} end",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = search_sessions("needle", agent="claude", scope="body")
+    matched = [s for s in result if s["uuid"] == "body-long-1"]
+    assert matched
+    snippet = matched[0]["snippet"]
+    assert len(snippet) <= 200
+    assert "needle" in snippet
+
+
+# ---------------------------------------------------------------------------
+# Direct unit tests for the new helpers
+# ---------------------------------------------------------------------------
+
+
+def test_parse_query_basic() -> None:
+    assert _parse_query("pwa manifest") == (["pwa", "manifest"], [])
+
+
+def test_parse_query_negative() -> None:
+    assert _parse_query("pwa -claude") == (["pwa"], ["claude"])
+
+
+def test_parse_query_quoted() -> None:
+    assert _parse_query('"foo bar" baz') == (["foo bar", "baz"], [])
+
+
+def test_parse_query_empty() -> None:
+    assert _parse_query("") == ([], [])
+    assert _parse_query(None or "") == ([], [])  # type: ignore[arg-type]
+
+
+def test_match_and_or_not() -> None:
+    hay = "the quick brown fox"
+    assert _match(hay, ["quick", "fox"], [], "AND") is True
+    assert _match(hay, ["quick", "missing"], [], "AND") is False
+    assert _match(hay, ["quick", "missing"], [], "OR") is True
+    assert _match(hay, ["missing", "absent"], [], "OR") is False
+    assert _match(hay, ["quick", "fox"], [], "NOT") is False
+    assert _match(hay, ["alpha", "beta"], [], "NOT") is True
+
+
+def test_match_negative_filter_in_all_operators() -> None:
+    """Negative terms must be excluded regardless of operator."""
+    hay = "the quick brown fox"
+    # AND: positive present, but negative present -> exclude
+    assert _match(hay, ["quick"], ["fox"], "AND") is False
+    # OR: positive present, but negative present -> exclude
+    assert _match(hay, ["quick"], ["fox"], "OR") is False
+    # NOT: term present (positive or negative) -> exclude
+    assert _match(hay, [], ["fox"], "NOT") is False
+    assert _match(hay, ["alpha"], ["fox"], "NOT") is False
+    # Sanity: nothing in hay, only negative.
+    assert _match("nothing", [], ["fox"], "AND") is True
+    assert _match("nothing", [], ["fox"], "NOT") is True
+
+
+def test_build_haystack_includes_tool_use_and_result() -> None:
+    """Haystack must contain text + tool_use input + tool_result content."""
+    from ai_reader.parsers.models import Message
+
+    msgs = [
+        Message(
+            role="user",
+            text="plain user text",
+            tool_use=(),
+            tool_result=(),
+        ),
+        Message(
+            role="assistant",
+            text="",
+            tool_use=({"name": "Bash", "input": '{"command": "pytest"}'},),
+            tool_result=(),
+        ),
+        Message(
+            role="user",
+            text="",
+            tool_use=(),
+            tool_result=({"content": "5 passed"},),
+        ),
+    ]
+    haystack = _build_haystack(msgs)
+    assert "plain user text" in haystack
+    assert "pytest" in haystack
+    assert "5 passed" in haystack
+
+
+def test_extract_snippet_centers_on_term() -> None:
+    hay = "lorem ipsum dolor sit amet, consectetur adipiscing elit"
+    snippet = _extract_snippet(hay, ["consectetur"], max_len=200)
+    assert "consectetur" in snippet
+    # The snippet is lowercased (haystack was lowercased by _build_haystack
+    # in real usage; the helper itself does not lowercase the input).
+    assert "dolor" in snippet or "adipiscing" in snippet
+    # No match -> empty string.
+    assert _extract_snippet("nothing here", ["nope"]) == ""
