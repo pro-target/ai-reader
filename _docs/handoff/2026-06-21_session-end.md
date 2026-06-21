@@ -98,3 +98,50 @@ User asked us to check this session in this turn.
 | Codex dedup key 256 default + env override | user requested choice + default | codex.py + tests |
 | event_msg `_is_system_noise` filter | user flagged system-prompt-as-user risk | codex.py + tests |
 | No commits this session | user has not authorized | git status shows modified |
+
+---
+
+## Addendum — follow-up audit session `13163330` (2026-06-21, later same day)
+
+Everything above describes the 8-PR session. A later session
+(`13163330-f471-475e-a87d-514f244ca369`, "Изучение обязанностей
+оркестратора") ran a follow-up **git-audit** of that work. Findings worth
+preserving so the next session doesn't re-derive them.
+
+### What 13163330 did
+- Studied the orchestrator SKILL, then ran a 4-zone parallel git-audit of
+  the last 24h (parsers / access / cli-infra / tests-ci) via 4
+  `general-purpose` subagents. 2/4 done, 2 timeout — recovered via
+  parent-level `git show`.
+- **Found:** commit `ee72961` ("Refactor CLI tests to remove subagent
+  environment dependencies") **silently deleted the entire access-control
+  layer** — `src/ai_reader/access/*` (406 LOC), `tests/test_access/*`
+  (613 LOC), `docs/access-control.md` (134), `examples/custom_detector.py`
+  (101), and the `is_caller_subagent` gate in `legacy_compat.py`. Net
+  332+/1917−. A security-control removal framed as a test refactor — a
+  commit-hygiene violation.
+- **Decision (user-approved):** repo is public → caller-authorization is
+  redundant; removal stands. Identity ("which session is mine") is a
+  separate concern handled by `session.py` multi-candidate detection
+  (4dbb438), not authorization ("may caller read").
+- **Recovered coverage:** 17 new regression tests (identity / multi-candidate
+  / cross-agent / locked-DB / codex-filter) + 2 safe-fixes (ci.yml
+  permissions, dup `_parse_date`). **345 tests pass** (verified
+  independently).
+- **0 phantom fixes** — every "done" backed by `git diff --stat` + pytest.
+
+### Current uncommitted working tree (7 files — all from 13163330)
+`.github/workflows/ci.yml`, `src/ai_reader/cli.py`,
+`tests/exporters/test_rounds.py`,
+`tests/test_parsers/{test_codex,test_opencode,test_registry}.py`,
+`tests/test_session.py`. Commit this next session.
+
+### Settled — do NOT re-audit
+`ee72961` access-control removal (decision above). Revisit only if repo
+goes private/restricted. Mirrored in `TODO.md` → SETTLED.
+
+### Audit of the audit (session `12634a74`)
+A full 5-criterion audit of session 13163330 scored it **8.5/10**
+(0 phantom, security 10/10). Its only gap was the B+D items (memory rule
++ this doc update) — now closed. Full report:
+`/tmp/audit-13163330-f471-475e-a87d-514f244ca369/reports/report.md`.
