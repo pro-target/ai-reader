@@ -25,9 +25,44 @@ Schema (relevant columns only)::
     CREATE TABLE message (
         id              TEXT PRIMARY KEY,
         session_id      TEXT NOT NULL REFERENCES session(id),
-        data            TEXT,       -- JSON blob
-        ... (other fields ignored)
+        time_created    INTEGER NOT NULL,
+        time_updated    INTEGER NOT NULL,
+        data            TEXT NOT NULL  -- JSON metadata: role/time/agent/model
     );
+    CREATE TABLE part (
+        id              TEXT PRIMARY KEY,
+        message_id      TEXT NOT NULL REFERENCES message(id),
+        session_id      TEXT NOT NULL,
+        time_created    INTEGER NOT NULL,
+        time_updated    INTEGER NOT NULL,
+        data            TEXT NOT NULL  -- JSON: {type, text|tool|state|...}
+    );
+
+``message.data`` carries only metadata (``role``, ``time``,
+``agent``, ``model``); the actual message **text and tool calls live
+in the ``part`` table**, one row per part, linked to the message by
+``part.message_id`` and ordered by ``part.time_created`` (ties broken
+by ``part.id``).
+
+Observed ``part.data`` shapes (``data.type``):
+
+* ``text``        — ``{"type":"text","text":"..."}``
+* ``reasoning``   — ``{"type":"reasoning","text":"...", "time":{...}}``
+* ``tool``        — single combined call+result:
+  ``{"type":"tool","tool":"<name>","callID":"...","state":{
+     "status":"completed|error|running",
+     "input":{...},          # tool-call arguments
+     "output":"..."          # tool-result content (absent on error)
+  }}``
+* ``step-start``  — ``{"type":"step-start","snapshot":"..."}`` (boundary)
+* ``step-finish`` — ``{"type":"step-finish","tokens":{...}}`` (boundary)
+* ``file``        — ``{"type":"file","mime":...,"url":"data:..."}`` (binary, skipped)
+* ``patch``       — ``{"type":"patch","hash":...,"files":[...]}`` (skipped)
+
+A ``tool`` part is BOTH the call (``tool``+``state.input``) and the
+result (``state.output``) in one row; the parser emits a
+``tool_use`` entry for the call and a ``tool_result`` entry for the
+output.
 """
 
 from __future__ import annotations
@@ -294,96 +329,123 @@ def read_session(
 
 
 
-_SELECT_MESSAGES = "SELECT data FROM message WHERE session_id = ?"
+# Order: message row first (so messages keep DB order), then parts by
+# time_created (ties broken by id).  LEFT JOIN so a message with no
+# parts still yields a row (with NULL part columns) — robust against
+# older DBs / edge cases.
+_SELECT_MESSAGES_WITH_PARTS = (
+    "SELECT m.id AS mid, m.time_created AS mtime, m.data AS mdata, "
+    "p.id AS pid, p.data AS pdata "
+    "FROM message m "
+    "LEFT JOIN part p ON p.message_id = m.id "
+    "WHERE m.session_id = ? "
+    "ORDER BY m.time_created, m.id, p.time_created, p.id"
+)
+_SELECT_MESSAGES_ONLY = (
+    "SELECT id AS mid, time_created AS mtime, data AS mdata, "
+    "NULL AS pid, NULL AS pdata "
+    "FROM message WHERE session_id = ? "
+    "ORDER BY time_created, id"
+)
 
 
-def _opencode_message_from_data(data: object) -> Optional[Message]:
-    """Decode an OpenCode ``message.data`` JSON blob into a :class:`Message`.
-
-    OpenCode stores each message as a JSON blob whose shape follows the
-    AI SDK ``Message`` type.  We extract ``role``, concatenated text
-    parts, ``tool`` invocations (``toolName``/``input``) and
-    ``tool-result`` parts.  Returns ``None`` when the blob is unusable.
-    """
-    if not isinstance(data, str) or not data.strip():
+def _json_or_none(blob: object) -> Optional[dict]:
+    if not isinstance(blob, str) or not blob.strip():
         return None
     try:
-        record = json.loads(data)
+        rec = json.loads(blob)
     except (json.JSONDecodeError, TypeError):
         return None
-    if not isinstance(record, dict):
+    return rec if isinstance(rec, dict) else None
+
+
+def _stringify(value: object) -> str:
+    """Best-effort serialise a tool input/output value to a string."""
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _role_from_message_data(message_data: Optional[dict]) -> Optional[str]:
+    """Map ``message.data.role`` → our role, or ``None`` if unusable.
+
+    Real OpenCode messages carry ``role`` in ``{"user","assistant"}``.
+    We also tolerate ``"tool"`` for forward-compat; unknown roles are
+    rejected (returns ``None`` → message skipped).
+    """
+    if message_data is None:
         return None
-    raw_role = record.get("role", "")
-    if not isinstance(raw_role, str):
+    raw = message_data.get("role")
+    if not isinstance(raw, str):
         return None
-    role = raw_role.lower()
-    if role == "tool":
-        mapped_role = "tool"
-    elif role in ("user", "assistant"):
-        mapped_role = role
-    else:
+    role = raw.lower()
+    if role in ("user", "assistant", "tool"):
+        return role
+    return None
+
+
+def _build_message(
+    message_data: Optional[dict], parts: List[dict]
+) -> Optional[Message]:
+    """Assemble a :class:`Message` from metadata + ordered parts.
+
+    * ``text``      = concatenation of ``text`` parts + ``reasoning``
+                      parts (reasoning inlined unmarked; kept in-order
+                      so the dialogue reads naturally — matches how the
+                      Codex/Claude parsers fold thinking into text).
+    * ``tool_use``  = one entry per ``tool`` part
+                      (``{name: tool, input: state.input}``).
+    * ``tool_result`` = one entry per ``tool`` part that has a
+                      ``state.output`` (``{content: state.output}``).
+                      Error/running tools without output are omitted
+                      from results.
+    * ``step-start``/``step-finish``/``file``/``patch`` — boundary or
+                      binary markers: skipped (no text leak, no crash).
+    """
+    role = _role_from_message_data(message_data)
+    if role is None:
         return None
 
     text_chunks: List[str] = []
     tool_use: List[dict] = []
     tool_result: List[dict] = []
 
-    content = record.get("content")
-    if isinstance(content, str):
-        text_chunks.append(content)
-    elif isinstance(content, list):
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            part_type = part.get("type", "")
-            if part_type in ("text", "input_text", "output_text", ""):
+    # Fallback: legacy DBs that stored content inside message.data.
+    if message_data is not None and not parts:
+        content = message_data.get("content")
+        if isinstance(content, str) and content:
+            text_chunks.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                ptype = part.get("type", "")
                 t = part.get("text", "")
-                if isinstance(t, str) and t:
+                if ptype in ("text", "input_text", "output_text", "") and isinstance(t, str) and t:
                     text_chunks.append(t)
-            elif part_type == "tool-call" or part_type == "toolCall":
-                name = part.get("toolName") or part.get("name") or ""
-                args = part.get("input") or part.get("args", "")
-                if isinstance(args, str):
-                    input_str = args
-                else:
-                    try:
-                        input_str = json.dumps(args, ensure_ascii=False)
-                    except (TypeError, ValueError):
-                        input_str = str(args)
-                tool_use.append({"name": name, "input": input_str})
-            elif part_type in ("tool-result", "toolResult"):
-                rc = part.get("content") or part.get("result", "")
-                if isinstance(rc, list):
-                    pieces: List[str] = []
-                    for piece in rc:
-                        if isinstance(piece, dict):
-                            t = piece.get("text", "")
-                            if isinstance(t, str) and t:
-                                pieces.append(t)
-                    rc = "\n".join(pieces)
-                elif not isinstance(rc, str):
-                    try:
-                        rc = json.dumps(rc, ensure_ascii=False)
-                    except (TypeError, ValueError):
-                        rc = str(rc)
-                tool_result.append({"content": rc})
 
-    # Top-level tool fields (some OpenCode versions store them flat).
-    if not tool_use:
-        tool_name = record.get("toolName") or record.get("tool_name")
-        if isinstance(tool_name, str) and tool_name:
-            args = record.get("input") or record.get("args", "")
-            if isinstance(args, str):
-                input_str = args
-            else:
-                try:
-                    input_str = json.dumps(args, ensure_ascii=False)
-                except (TypeError, ValueError):
-                    input_str = str(args)
-            tool_use.append({"name": tool_name, "input": input_str})
+    for part in parts:
+        ptype = part.get("type", "")
+        if ptype in ("text", "reasoning"):
+            t = part.get("text", "")
+            if isinstance(t, str) and t:
+                text_chunks.append(t)
+        elif ptype == "tool":
+            name = part.get("tool") or part.get("toolName") or part.get("name") or ""
+            state = part.get("state") if isinstance(part.get("state"), dict) else {}
+            inp = state.get("input")
+            tool_use.append({"name": name, "input": _stringify(inp)})
+            if "output" in state and state["output"] is not None:
+                tool_result.append({"content": _stringify(state["output"])})
+        # step-start / step-finish / file / patch / unknown → skip
 
     return Message(
-        role=mapped_role,
+        role=role,
         text="\n".join(text_chunks),
         tool_use=tuple(tool_use),
         tool_result=tuple(tool_result),
@@ -391,7 +453,13 @@ def _opencode_message_from_data(data: object) -> Optional[Message]:
 
 
 def _extract_messages_from_db(db_path: str, uuid: str) -> List[Message]:
-    """Read all messages for ``uuid`` from an OpenCode SQLite DB."""
+    """Read all messages for ``uuid`` from an OpenCode SQLite DB.
+
+    Joins ``message`` with ``part`` (text/tool/reasoning bodies live in
+    ``part``).  Falls back to a metadata-only scan if the ``part`` table
+    is absent (older DBs).  Never raises on missing/malformed parts —
+    those messages degrade to empty text.
+    """
     messages: List[Message] = []
     conn = _open_db(db_path)
     if conn is None:
@@ -399,7 +467,16 @@ def _extract_messages_from_db(db_path: str, uuid: str) -> List[Message]:
     try:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        rows = cursor.execute(_SELECT_MESSAGES, (uuid,)).fetchall()
+        try:
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='part'"
+            )
+            has_parts = cursor.fetchone() is not None
+        except sqlite3.Error:
+            has_parts = False
+
+        sql = _SELECT_MESSAGES_WITH_PARTS if has_parts else _SELECT_MESSAGES_ONLY
+        rows = cursor.execute(sql, (uuid,)).fetchall()
     except sqlite3.Error:
         conn.close()
         return messages
@@ -408,11 +485,37 @@ def _extract_messages_from_db(db_path: str, uuid: str) -> List[Message]:
             conn.close()
         except sqlite3.Error:
             pass
+
+    # Group consecutive rows by mid (ORDER BY keeps a message's rows
+    # contiguous).  Each row carries one part (or NULL pdata for a
+    # part-less message under LEFT JOIN).
+    current_mid: Optional[str] = None
+    current_data: Optional[dict] = None
+    current_parts: List[dict] = []
+
+    def flush() -> None:
+        nonlocal current_mid, current_data, current_parts
+        if current_mid is None:
+            return
+        msg = _build_message(current_data, current_parts)
+        if msg is not None:
+            messages.append(msg)
+        current_mid = None
+        current_data = None
+        current_parts = []
+
     for row in rows:
-        data = row["data"] if "data" in row.keys() else None
-        parsed = _opencode_message_from_data(data)
-        if parsed is not None:
-            messages.append(parsed)
+        mid = row["mid"]
+        if mid != current_mid:
+            flush()
+            current_mid = mid
+            current_data = _json_or_none(row["mdata"])
+            current_parts = []
+        pdata_blob = row["pdata"] if "pdata" in row.keys() else None
+        part = _json_or_none(pdata_blob)
+        if part is not None:
+            current_parts.append(part)
+    flush()
     return messages
 
 
@@ -424,8 +527,10 @@ def read_messages(
     """Return the full message list for an OpenCode session.
 
     Reuses :func:`read_session` for path resolution (which also validates
-    the uuid).  Reads the ``message.data`` JSON blobs for the session and
-    preserves tool-call / tool-result structure where present.
+    the uuid).  Reads ``message`` rows joined to their ``part`` rows —
+    real message text/tools live in the ``part`` table, while
+    ``message.data`` only carries metadata (role/time/agent/model).
+    Falls back to metadata-only when the ``part`` table is absent.
 
     Raises:
         FileNotFoundError: no DB contains a session with this id.

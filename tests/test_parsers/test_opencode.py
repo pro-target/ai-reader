@@ -1,6 +1,7 @@
 """Tests for the OpenCode SQLite parser."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -179,29 +180,73 @@ def test_row_to_session_untitled() -> None:
 
 
 def test_read_messages_basic(fake_opencode_db: Path) -> None:
-    """The minimal fixture has no ``data`` column content, so messages are empty."""
+    """The minimal fixture has parts: user text + assistant text."""
     msgs = opencode.read_messages("test-oc-1", override=str(fake_opencode_db))
     assert isinstance(msgs, list)
-    # The basic fixture inserts rows without a ``data`` blob; the extractor
-    # skips rows with NULL/empty data.
-    assert msgs == []
+    assert len(msgs) == 2
+    assert msgs[0].role == "user"
+    assert msgs[0].text == "Hello"
+    assert msgs[1].role == "assistant"
+    assert msgs[1].text == "Hi there"
+
+
+def test_read_messages_message_without_parts_is_graceful(
+    fake_opencode_db: Path,
+) -> None:
+    """test-oc-2's message has no part rows → empty text, no crash."""
+    msgs = opencode.read_messages("test-oc-2", override=str(fake_opencode_db))
+    assert len(msgs) == 1
+    assert msgs[0].role == "assistant"
+    assert msgs[0].text == ""
+
+
+def test_read_messages_partless_db_falls_back_to_metadata(tmp_path: Path) -> None:
+    """An old DB with no ``part`` table at all still parses without crashing."""
+    db = tmp_path / "nodb.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, title TEXT,
+            time_created INTEGER, time_updated INTEGER);
+        CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT,
+            time_created INTEGER, time_updated INTEGER, data TEXT);
+        """
+    )
+    conn.execute("INSERT INTO session VALUES ('s', NULL, 't', 1, 2)")
+    conn.execute(
+        "INSERT INTO message VALUES ('m', 's', 1, 1, ?)",
+        (json.dumps({"role": "assistant", "content": "legacy text"}),),
+    )
+    conn.commit()
+    conn.close()
+    msgs = opencode.read_messages("s", override=str(db))
+    assert len(msgs) == 1
+    # Fallback path reads content from message.data when no parts exist.
+    assert msgs[0].text == "legacy text"
 
 
 def test_read_messages_preserves_tool_calls(fake_opencode_db_with_tools: Path) -> None:
     msgs = opencode.read_messages("oc-tools-1", override=str(fake_opencode_db_with_tools))
-    assert len(msgs) == 3
-    assert msgs[0].role == "user"
-    assert msgs[0].text == "run tests"
+    assert len(msgs) == 2
+    user = msgs[0]
+    assert user.role == "user"
+    assert user.text == "run tests"
     assistant = msgs[1]
     assert assistant.role == "assistant"
-    assert assistant.text == "okay"
-    assert len(assistant.tool_use) == 1
+    # text = reasoning + text parts, in order; step-* skipped.
+    assert "thinking..." in assistant.text
+    assert "okay" in assistant.text
+    # step-start/step-finish leak no text
+    assert "snapshot" not in assistant.text
+    assert "tokens" not in assistant.text
+    # Two tool parts → two tool_use entries (completed + error).
+    assert len(assistant.tool_use) == 2
     assert assistant.tool_use[0]["name"] == "shell"
-    assert assistant.tool_use[0]["input"] == "pytest"
-    tool = msgs[2]
-    assert tool.role == "tool"
-    assert len(tool.tool_result) == 1
-    assert tool.tool_result[0]["content"] == "5 passed"
+    assert "pytest" in assistant.tool_use[0]["input"]
+    assert assistant.tool_use[1]["name"] == "write"
+    # Only the completed tool produced an output → one tool_result.
+    assert len(assistant.tool_result) == 1
+    assert assistant.tool_result[0]["content"] == "5 passed"
 
 
 def test_read_messages_missing_raises(fake_opencode_db: Path) -> None:

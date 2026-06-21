@@ -220,7 +220,15 @@ def fake_pi_session(tmp_sessions_dir: Path) -> Path:
 
 @pytest.fixture
 def fake_opencode_db(tmp_sessions_dir: Path) -> Path:
-    """A minimal OpenCode SQLite database with one session + 2 messages."""
+    """A minimal OpenCode SQLite database with one session + 2 messages.
+
+    Mirrors the real schema: ``message`` rows carry metadata-only
+    ``data`` (role/time) and the actual bodies live in the ``part``
+    table linked by ``message_id``.  ``test-oc-1`` has a user message
+    with a ``text`` part and an assistant message with a ``text`` part.
+    ``test-oc-2`` has one message with NO parts (graceful-degradation
+    case).
+    """
     db_path = tmp_sessions_dir / "opencode.db"
     conn = sqlite3.connect(str(db_path))
     conn.executescript(
@@ -233,33 +241,58 @@ def fake_opencode_db(tmp_sessions_dir: Path) -> Path:
             time_updated INTEGER
         );
         CREATE TABLE message (
-            id         TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL REFERENCES session(id)
+            id           TEXT PRIMARY KEY,
+            session_id   TEXT NOT NULL REFERENCES session(id),
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data         TEXT
+        );
+        CREATE TABLE part (
+            id           TEXT PRIMARY KEY,
+            message_id   TEXT NOT NULL REFERENCES message(id),
+            session_id   TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data         TEXT NOT NULL
         );
         """
     )
     conn.execute(
         "INSERT INTO session VALUES (?, ?, ?, ?, ?)",
-        (
-            "test-oc-1",
-            None,
-            "First OpenCode session",
-            1_716_000_000_000,
-            1_716_000_500_000,
-        ),
+        ("test-oc-1", None, "First OpenCode session",
+         1_716_000_000_000, 1_716_000_500_000),
     )
     conn.execute(
         "INSERT INTO session VALUES (?, ?, ?, ?, ?)",
-        (
-            "test-oc-2",
-            "test-oc-1",
-            "Child session",
-            1_716_000_600_000,
-            1_716_000_900_000,
-        ),
+        ("test-oc-2", "test-oc-1", "Child session",
+         1_716_000_600_000, 1_716_000_900_000),
     )
-    for n, sid in enumerate(("test-oc-1", "test-oc-1", "test-oc-2")):
-        conn.execute("INSERT INTO message VALUES (?, ?)", (f"m-{n}", sid))
+    # test-oc-1: user msg (text part) + assistant msg (text part)
+    conn.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+        ("m-0", "test-oc-1", 1_716_000_100_000, 1_716_000_100_000,
+         json.dumps({"role": "user", "time": {"created": 1_716_000_100_000}})),
+    )
+    conn.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+        ("m-1", "test-oc-1", 1_716_000_200_000, 1_716_000_200_000,
+         json.dumps({"role": "assistant", "time": {"created": 1_716_000_200_000}})),
+    )
+    # test-oc-2: one message with NO parts
+    conn.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+        ("m-2", "test-oc-2", 1_716_000_700_000, 1_716_000_700_000,
+         json.dumps({"role": "assistant", "time": {"created": 1_716_000_700_000}})),
+    )
+    conn.executemany(
+        "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("p-0", "m-0", "test-oc-1", 1_716_000_100_000, 1_716_000_100_000,
+             json.dumps({"type": "text", "text": "Hello"})),
+            ("p-1", "m-1", "test-oc-1", 1_716_000_200_000, 1_716_000_200_000,
+             json.dumps({"type": "text", "text": "Hi there"})),
+        ],
+    )
     conn.commit()
     conn.close()
     return db_path
@@ -456,7 +489,17 @@ def fake_pi_session_with_tools(tmp_sessions_dir: Path) -> Path:
 
 @pytest.fixture
 def fake_opencode_db_with_tools(tmp_sessions_dir: Path) -> Path:
-    """An OpenCode DB whose message rows carry JSON ``data`` blobs with tools."""
+    """OpenCode DB with realistic ``part`` rows for read_messages tests.
+
+    Seeds (session ``oc-tools-1``):
+      * ``u1`` user msg        — one ``text`` part.
+      * ``a1`` assistant msg   — multi-part ordered:
+          ``step-start`` → ``reasoning`` → ``text`` → ``tool`` (call+result
+          combined, status=completed) → ``tool`` (error, no output) →
+          ``step-finish``.
+    Covers: text, reasoning inlined, tool-call, tool-result, tool-error
+    (no output), step-* boundary markers skipped, multi-part ordering.
+    """
     db_path = tmp_sessions_dir / "opencode_tools.db"
     conn = sqlite3.connect(str(db_path))
     conn.executescript(
@@ -469,9 +512,19 @@ def fake_opencode_db_with_tools(tmp_sessions_dir: Path) -> Path:
             time_updated INTEGER
         );
         CREATE TABLE message (
-            id         TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL REFERENCES session(id),
-            data       TEXT
+            id           TEXT PRIMARY KEY,
+            session_id   TEXT NOT NULL REFERENCES session(id),
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data         TEXT
+        );
+        CREATE TABLE part (
+            id           TEXT PRIMARY KEY,
+            message_id   TEXT NOT NULL REFERENCES message(id),
+            session_id   TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data         TEXT NOT NULL
         );
         """
     )
@@ -479,47 +532,46 @@ def fake_opencode_db_with_tools(tmp_sessions_dir: Path) -> Path:
         "INSERT INTO session VALUES (?, NULL, ?, ?, ?)",
         ("oc-tools-1", "Tool session", 1_716_000_000_000, 1_716_000_500_000),
     )
-    messages = [
-        {
-            "id": "oc-m1",
-            "session_id": "oc-tools-1",
-            "data": json.dumps({"role": "user", "content": "run tests"}),
-        },
-        {
-            "id": "oc-m2",
-            "session_id": "oc-tools-1",
-            "data": json.dumps(
-                {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "text", "text": "okay"},
-                        {
-                            "type": "tool-call",
-                            "toolName": "shell",
-                            "input": "pytest",
-                        },
-                    ],
-                }
-            ),
-        },
-        {
-            "id": "oc-m3",
-            "session_id": "oc-tools-1",
-            "data": json.dumps(
-                {
-                    "role": "tool",
-                    "content": [
-                        {"type": "tool-result", "content": "5 passed"}
-                    ],
-                }
-            ),
-        },
-    ]
-    for m in messages:
-        conn.execute(
-            "INSERT INTO message VALUES (?, ?, ?)",
-            (m["id"], m["session_id"], m["data"]),
-        )
+    conn.executemany(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+        [
+            ("u1", "oc-tools-1", 1_716_000_100_000, 1_716_000_100_000,
+             json.dumps({"role": "user"})),
+            ("a1", "oc-tools-1", 1_716_000_200_000, 1_716_000_200_000,
+             json.dumps({"role": "assistant"})),
+        ],
+    )
+    t0 = 1_716_000_200_000
+    conn.executemany(
+        "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            # user text
+            ("u1-p0", "u1", "oc-tools-1", t0 - 100_000, t0 - 100_000,
+             json.dumps({"type": "text", "text": "run tests"})),
+            # assistant multi-part, ordered by time_created
+            ("a1-p0", "a1", "oc-tools-1", t0 + 0, t0 + 0,
+             json.dumps({"type": "step-start", "snapshot": "abc"})),
+            ("a1-p1", "a1", "oc-tools-1", t0 + 1, t0 + 1,
+             json.dumps({"type": "reasoning", "text": "thinking..."})),
+            ("a1-p2", "a1", "oc-tools-1", t0 + 2, t0 + 2,
+             json.dumps({"type": "text", "text": "okay"})),
+            ("a1-p3", "a1", "oc-tools-1", t0 + 3, t0 + 3,
+             json.dumps({
+                 "type": "tool", "tool": "shell", "callID": "c1",
+                 "state": {"status": "completed",
+                           "input": {"command": "pytest"},
+                           "output": "5 passed"},
+             })),
+            ("a1-p4", "a1", "oc-tools-1", t0 + 4, t0 + 4,
+             json.dumps({
+                 "type": "tool", "tool": "write", "callID": "c2",
+                 "state": {"status": "error",
+                           "input": {"path": "/x"}},
+             })),
+            ("a1-p5", "a1", "oc-tools-1", t0 + 5, t0 + 5,
+             json.dumps({"type": "step-finish", "tokens": {"total": 1}})),
+        ],
+    )
     conn.commit()
     conn.close()
     return db_path

@@ -11,7 +11,7 @@ this file.
 |--------------|----------------|---------------------|----------------------------------------|
 | claude       | yes            | yes                 | Fully working.                         |
 | codex        | yes            | yes                 | Fully working.                         |
-| opencode     | yes            | **no (empty)**      | Known bug — see below.                 |
+| opencode     | yes            | yes                 | Reads message bodies from `part` table.|
 | pi           | yes            | yes (sparse)        | Working; many system/meta-only rows.   |
 | antigravity  | 0 on dev box   | n/a                 | CI-only — see below.                   |
 
@@ -26,14 +26,22 @@ plus the `fake_antigravity_brain` fixture in
 [conftest.py](../tests/conftest.py)). Live validation deferred until
 real data is available.
 
-### OpenCode (known message-body gap)
+### OpenCode (message bodies in `part` table)
 
-Real-session message bodies live in a separate `part` table
-(text/reasoning/tool/step-* parts); the current parser reads only
-`message.data` (metadata) → empty message text on real sessions.
-Fixture tests seed `message.data` directly, so they pass and do not
-catch this. Fix = join `part.data` by `message_id`. Tracked as a
-follow-up.
+OpenCode stores message text/tools in a separate `part` table linked
+to `message` by `part.message_id` (ordered by `time_created`);
+`message.data` holds only metadata (role/time/agent/model).  The
+parser joins `message` to `part` and assembles each `Message`:
+
+- `text`        = concatenation of `text` + `reasoning` parts (in order).
+- `tool_use`     = `{name, input}` per `tool` part (`state.input`).
+- `tool_result`  = `{content}` per `tool` part with `state.output`
+                   (error/running tools omit results).
+- `step-start`/`step-finish`/`file`/`patch` — boundary/binary markers, skipped.
+
+Live-validated on a 106-message session: 82 messages with non-empty
+text, 87 with tool calls, 83 with tool results (previously 0/106 —
+old parser read only `message.data`).
 
 ---
 
