@@ -82,6 +82,13 @@ That's it. The installer:
 
 `ai-reader` (this library) stays separate from the `~/.agents` skills monorepo — the GitHub `pro-target` org groups them; no merge. The public API grows first (message + tool-call access); migration of consumers off the legacy wrapper scripts is deferred until the library reaches feature parity.
 
+## Known limitations
+
+- **Antigravity** — no real Antigravity brain on the dev box; correctness is covered only by fixture unit tests. Live validation deferred until real data is available.
+- **OpenCode** — real-session message bodies live in a separate `part` table (text/reasoning/tool/step-* parts); the current parser reads only `message.data` (metadata), so message text is empty on real sessions. Fixture tests seed `message.data` directly and miss this. Fix = join `part.data` by `message_id`; tracked as a follow-up.
+
+See [docs/parsers.md](docs/parsers.md) for the full parser-coverage matrix.
+
 ## Usage
 
 ### As an MCP server (recommended)

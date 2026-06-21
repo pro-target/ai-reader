@@ -1,3 +1,42 @@
+# Parser coverage & known limitations
+
+This file documents which agent parsers have been live-validated
+against real session data on a developer box, and the known gaps.
+For the "how to add a new parser" guide, see the second half of
+this file.
+
+## Live-validation status
+
+| Agent        | Sessions found | Messages non-empty? | Notes                                  |
+|--------------|----------------|---------------------|----------------------------------------|
+| claude       | yes            | yes                 | Fully working.                         |
+| codex        | yes            | yes                 | Fully working.                         |
+| opencode     | yes            | **no (empty)**      | Known bug — see below.                 |
+| pi           | yes            | yes (sparse)        | Working; many system/meta-only rows.   |
+| antigravity  | 0 on dev box   | n/a                 | CI-only — see below.                   |
+
+Status confirmed 2026-06-21 via `ai-reader list` / `ai-reader read
+--messages` against real session stores.
+
+### Antigravity (CI-only, deferred)
+
+No real Antigravity brain on the dev box; correctness is covered by
+fixture unit tests ([test_antigravity.py](../tests/test_parsers/test_antigravity.py)
+plus the `fake_antigravity_brain` fixture in
+[conftest.py](../tests/conftest.py)). Live validation deferred until
+real data is available.
+
+### OpenCode (known message-body gap)
+
+Real-session message bodies live in a separate `part` table
+(text/reasoning/tool/step-* parts); the current parser reads only
+`message.data` (metadata) → empty message text on real sessions.
+Fixture tests seed `message.data` directly, so they pass and do not
+catch this. Fix = join `part.data` by `message_id`. Tracked as a
+follow-up.
+
+---
+
 # Adding a new agent parser
 
 A parser turns an agent's session storage into `Session` objects.
