@@ -496,9 +496,10 @@ def fake_opencode_db_with_tools(tmp_sessions_dir: Path) -> Path:
       * ``a1`` assistant msg   — multi-part ordered:
           ``step-start`` → ``reasoning`` → ``text`` → ``tool`` (call+result
           combined, status=completed) → ``tool`` (error, no output) →
-          ``step-finish``.
+          ``file`` → ``patch`` → ``step-finish``.
     Covers: text, reasoning inlined, tool-call, tool-result, tool-error
-    (no output), step-* boundary markers skipped, multi-part ordering.
+    (no output), metadata-only file/patch parts, step-* boundary markers
+    skipped, multi-part ordering.
     """
     db_path = tmp_sessions_dir / "opencode_tools.db"
     conn = sqlite3.connect(str(db_path))
@@ -569,6 +570,21 @@ def fake_opencode_db_with_tools(tmp_sessions_dir: Path) -> Path:
                            "input": {"path": "/x"}},
              })),
             ("a1-p5", "a1", "oc-tools-1", t0 + 5, t0 + 5,
+             json.dumps({
+                 "type": "file",
+                 "mime": "image/png",
+                 "filename": "manifest.png",
+                 "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA",
+             })),
+            ("a1-p6", "a1", "oc-tools-1", t0 + 6, t0 + 6,
+             json.dumps({
+                 "type": "patch",
+                 "hash": "abc123",
+                 "files": [
+                     {"path": "src/app.py", "added": 3, "removed": 1},
+                 ],
+             })),
+            ("a1-p7", "a1", "oc-tools-1", t0 + 7, t0 + 7,
              json.dumps({"type": "step-finish", "tokens": {"total": 1}})),
         ],
     )

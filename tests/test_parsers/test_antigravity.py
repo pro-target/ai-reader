@@ -19,6 +19,7 @@ from ai_reader.parsers.antigravity import (
     _normalise_title,
     _parse_iso_timestamp,
     _resolve_brain_roots,
+    _scan_brain,
 )
 
 
@@ -27,22 +28,33 @@ from ai_reader.parsers.antigravity import (
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    not any(
-        Path(p).expanduser().is_dir() and any(Path(p).expanduser().iterdir())
-        for p in ("~/.gemini/antigravity/brain", "~/.gemini/antigravity-cli/brain")
-    ),
-    reason="no real Antigravity brain dir on this host",
-)
-def test_list_sessions_real(real_antigravity_root: Path) -> None:
-    # When AI_READER_HOME is set (autouse fixture), pass it explicitly.
-    sessions = antigravity.list_sessions()
-    # If autouse isolation redirected to an empty tree, the result is
-    # empty; this test only asserts it does not raise.
+def test_list_sessions_real(real_antigravity_root: Path | None) -> None:
+    if real_antigravity_root is None:
+        pytest.skip("no real Antigravity brain dir on this host")
+
+    sessions = antigravity.list_sessions(base_dir=str(real_antigravity_root))
     assert isinstance(sessions, list)
     for s in sessions[:3]:
         assert s.agent is AgentName.ANTIGRAVITY
         assert s.title
+
+
+def test_scan_brain_real_smoke(real_antigravity_root: Path | None) -> None:
+    if real_antigravity_root is None:
+        pytest.skip("no real Antigravity brain dir on this host")
+
+    for brain in sorted(real_antigravity_root.iterdir(), key=lambda p: p.name):
+        session = _scan_brain(brain)
+        if session is None:
+            continue
+        assert session.agent is AgentName.ANTIGRAVITY
+        assert session.uuid == brain.name
+        assert session.title
+        assert session.path == str(brain)
+        assert session.message_count >= 0
+        return
+
+    pytest.skip("real Antigravity brain dir has no parseable sessions")
 
 
 # ---------------------------------------------------------------------------

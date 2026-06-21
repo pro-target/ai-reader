@@ -239,11 +239,21 @@ def test_read_messages_preserves_tool_calls(fake_opencode_db_with_tools: Path) -
     # step-start/step-finish leak no text
     assert "snapshot" not in assistant.text
     assert "tokens" not in assistant.text
-    # Two tool parts → two tool_use entries (completed + error).
-    assert len(assistant.tool_use) == 2
+    # Two real tool parts + file/patch metadata entries.
+    assert len(assistant.tool_use) == 4
     assert assistant.tool_use[0]["name"] == "shell"
     assert "pytest" in assistant.tool_use[0]["input"]
     assert assistant.tool_use[1]["name"] == "write"
+    assert assistant.tool_use[2]["name"] == "file"
+    file_input = json.loads(assistant.tool_use[2]["input"])
+    assert file_input["mime"] == "image/png"
+    assert file_input["filename"] == "manifest.png"
+    assert file_input["url"] == {"omitted": "data-url"}
+    assert "iVBOR" not in assistant.tool_use[2]["input"]
+    assert assistant.tool_use[3]["name"] == "patch"
+    patch_input = json.loads(assistant.tool_use[3]["input"])
+    assert patch_input["hash"] == "abc123"
+    assert patch_input["files"] == [{"path": "src/app.py", "added": 3, "removed": 1}]
     # Only the completed tool produced an output → one tool_result.
     assert len(assistant.tool_result) == 1
     assert assistant.tool_result[0]["content"] == "5 passed"

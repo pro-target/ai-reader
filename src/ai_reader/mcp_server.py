@@ -143,67 +143,19 @@ def _pi_text(parts: object) -> str:
     return "\n".join(chunks)
 
 
-def _extract_messages_claude(path: str) -> List[dict[str, Any]]:
-    """Return up to :data:`_MESSAGES_CAP` Claude messages as ``{role, content}`` dicts.
+def _project_message_content(m: Any) -> str:
+    """Return compact MCP content for text or user/assistant tool-only messages."""
+    text = getattr(m, "text", "")
+    if isinstance(text, str) and text:
+        return text
 
-    .. deprecated::
-        Backcompat shim retained for the unit tests; new code should go
-        through :func:`_extract_messages` (which dispatches to the
-        parser's public ``read_messages`` by uuid).
-    """
-    return _messages_from_parser(claude, path)
-
-
-def _extract_messages_codex(path: str) -> List[dict[str, Any]]:
-    """Return up to :data:`_MESSAGES_CAP` Codex messages as ``{role, content}`` dicts.
-
-    .. deprecated::
-        Backcompat shim retained for the unit tests; prefer
-        :func:`_extract_messages`.
-    """
-    return _messages_from_parser(codex, path)
-
-
-def _extract_messages_pi(path: str) -> List[dict[str, Any]]:
-    """Return up to :data:`_MESSAGES_CAP` Pi messages as ``{role, content}`` dicts.
-
-    .. deprecated::
-        Backcompat shim retained for the unit tests; prefer
-        :func:`_extract_messages`.
-    """
-    return _messages_from_parser(pi, path)
-
-
-def _messages_from_parser(parser: Any, path: str) -> List[dict[str, Any]]:
-    """Project a parser's internal extractor output to ``{role, content}`` dicts.
-
-    Reads the file at ``path`` directly through the parser's internal
-    extraction (rather than the uuid-resolved public API) so the mcp
-    helpers keep their original ``path``-in / list-out contract used by
-    the unit tests.  Only ``user`` and ``assistant`` roles are surfaced,
-    matching the historical MCP output; ``tool`` messages (e.g. Pi
-    ``toolResult`` records, Codex function-call outputs) are dropped so
-    the MCP ``read_session`` output shape is unchanged.
-    """
-    messages: List[dict[str, Any]] = []
-    try:
-        if parser is claude:
-            msgs = claude._extract_messages_from_jsonl(Path(path))
-        elif parser is codex:
-            msgs = codex._extract_messages_from_rollout(Path(path))
-        elif parser is pi:
-            msgs = pi._extract_messages_from_jsonl(Path(path))
-        else:
-            return []
-    except OSError:
-        return []
-    for m in msgs:
-        if len(messages) >= _MESSAGES_CAP:
-            break
-        if m.role not in ("user", "assistant"):
-            continue
-        messages.append({"role": m.role, "content": m.text})
-    return messages
+    chunks: List[str] = []
+    for tool in getattr(m, "tool_use", ()) or ():
+        name = tool.get("name") if isinstance(tool, dict) else None
+        chunks.append(f"[tool_use: {name}]" if name else "[tool_use]")
+    for _ in getattr(m, "tool_result", ()) or ():
+        chunks.append("[tool_result]")
+    return "\n".join(chunks)
 
 
 def _project_messages(messages: Sequence[Any]) -> List[dict[str, Any]]:
@@ -218,7 +170,10 @@ def _project_messages(messages: Sequence[Any]) -> List[dict[str, Any]]:
     for m in messages:
         if m.role not in ("user", "assistant"):
             continue
-        out.append({"role": m.role, "content": m.text})
+        content = _project_message_content(m)
+        if not content:
+            continue
+        out.append({"role": m.role, "content": content})
     return out
 
 

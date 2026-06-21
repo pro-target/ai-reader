@@ -225,7 +225,7 @@ def run_legacy_agent_audit() -> Optional[int]:
     legacy_only = {
         "--days", "--from-date", "--to-date", "--stats", "--export",
         "--full", "--index", "--all", "--search", "--msg-type",
-        "--author", "--intent", "--fuzzy", "--list", "--no-list",
+        "--author", "--intent", "--list", "--no-list",
         "--title-search", "--last", "--after-phrase", "--timeline",
         "--parallel", "--title-only", "--file-creator",
     }
@@ -238,6 +238,8 @@ def run_legacy_agent_audit() -> Optional[int]:
             return None
         agent = flags.get("--agent")
         if not agent:
+            if flags.get("--fuzzy"):
+                return _run_ai_reader(["read", str(session_id)])
             return None
         mapped = _LEGACY_AGENT_TO_AI_READER.get(str(agent).upper())
         if not mapped:

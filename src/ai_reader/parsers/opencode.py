@@ -56,8 +56,8 @@ Observed ``part.data`` shapes (``data.type``):
   }}``
 * ``step-start``  — ``{"type":"step-start","snapshot":"..."}`` (boundary)
 * ``step-finish`` — ``{"type":"step-finish","tokens":{...}}`` (boundary)
-* ``file``        — ``{"type":"file","mime":...,"url":"data:..."}`` (binary, skipped)
-* ``patch``       — ``{"type":"patch","hash":...,"files":[...]}`` (skipped)
+* ``file``        — ``{"type":"file","mime":...,"url":"data:..."}`` (metadata kept)
+* ``patch``       — ``{"type":"patch","hash":...,"files":[...]}`` (metadata kept)
 
 A ``tool`` part is BOTH the call (``tool``+``state.input``) and the
 result (``state.output``) in one row; the parser emits a
@@ -371,6 +371,39 @@ def _stringify(value: object) -> str:
         return str(value)
 
 
+_BINARY_PART_KEYS = {"base64", "blob", "bytes", "content", "contents", "data"}
+
+
+def _compact_part_metadata(value: object, key: str = "") -> object:
+    """Return part metadata with inline binary/blob payloads removed."""
+    key_l = key.lower()
+    if isinstance(value, str):
+        if value.startswith("data:"):
+            return {"omitted": "data-url"}
+        if key_l in _BINARY_PART_KEYS:
+            return {"omitted": "binary"}
+        return value
+    if isinstance(value, dict):
+        compact: dict = {}
+        for child_key, child_value in value.items():
+            if not isinstance(child_key, str):
+                continue
+            compact[child_key] = _compact_part_metadata(child_value, child_key)
+        return compact
+    if isinstance(value, list):
+        return [_compact_part_metadata(item, key) for item in value]
+    return value
+
+
+def _part_metadata_input(part: dict) -> str:
+    metadata = {
+        key: _compact_part_metadata(value, key)
+        for key, value in part.items()
+        if key != "type"
+    }
+    return _stringify(metadata)
+
+
 def _role_from_message_data(message_data: Optional[dict]) -> Optional[str]:
     """Map ``message.data.role`` → our role, or ``None`` if unusable.
 
@@ -404,8 +437,12 @@ def _build_message(
                       ``state.output`` (``{content: state.output}``).
                       Error/running tools without output are omitted
                       from results.
-    * ``step-start``/``step-finish``/``file``/``patch`` — boundary or
-                      binary markers: skipped (no text leak, no crash).
+    * ``file``/``patch`` = metadata-only ``tool_use`` entries. Inline
+                      data URLs / binary-looking payload fields are
+                      redacted, so manifests and patch summaries remain
+                      visible without blobs.
+    * ``step-start``/``step-finish`` — boundary markers: skipped
+                      (no text leak, no crash).
     """
     role = _role_from_message_data(message_data)
     if role is None:
@@ -442,7 +479,9 @@ def _build_message(
             tool_use.append({"name": name, "input": _stringify(inp)})
             if "output" in state and state["output"] is not None:
                 tool_result.append({"content": _stringify(state["output"])})
-        # step-start / step-finish / file / patch / unknown → skip
+        elif ptype in ("file", "patch"):
+            tool_use.append({"name": ptype, "input": _part_metadata_input(part)})
+        # step-start / step-finish / unknown → skip
 
     return Message(
         role=role,

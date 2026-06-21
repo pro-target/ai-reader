@@ -65,6 +65,23 @@ def _first_claude_uuid() -> str | None:
     return None
 
 
+def _write_claude_session(home: Path, uuid: str, title: str) -> None:
+    path = home / ".claude" / "projects" / "proj-a" / f"{uuid}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": title},
+                "timestamp": "2026-06-14T10:00:00Z",
+                "sessionId": uuid,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 # ---------------------------------------------------------------------------
 # In-process helper — runs ``cli.main`` in this process so coverage
 # lines count toward the report.
@@ -220,6 +237,75 @@ def test_cli_read_missing_uuid() -> None:
 def test_cli_read_not_found() -> None:
     """Valid uuid format but no such session -> exit 3 (not found)."""
     rc, out, err = _run_inproc(["read", "--agent", "claude", "definitely-not-here"])
+    assert rc == 3
+    assert "not found" in err.lower()
+
+
+def test_cli_read_unique_short_claude_uuid(
+    tmp_sessions_dir: Path,
+) -> None:
+    full = "46d7b4fc-70bc-4cb9-90f4-bca5e0c7e51a"
+    _write_claude_session(tmp_sessions_dir, full, "Unique short uuid")
+
+    rc, out, err = _run_inproc(
+        ["read", "--agent", "claude", "46d7b4fc"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+
+    assert rc == 0, err
+    assert full in out
+    assert "UUID:" in out
+
+
+def test_cli_read_unique_short_claude_uuid_without_agent(
+    tmp_sessions_dir: Path,
+) -> None:
+    full = "46d7b4fc-70bc-4cb9-90f4-bca5e0c7e51a"
+    _write_claude_session(tmp_sessions_dir, full, "Unique short uuid")
+
+    rc, out, err = _run_inproc(
+        ["read", "46d7b4fc"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+
+    assert rc == 0, err
+    assert full in out
+    assert "Agent:     CLAUDE" in out
+
+
+def test_cli_read_ambiguous_short_claude_uuid(
+    tmp_sessions_dir: Path,
+) -> None:
+    first = "46d7b4fc-70bc-4cb9-90f4-bca5e0c7e51a"
+    second = "46d7b4fc-1111-4cb9-90f4-bca5e0c7e51a"
+    _write_claude_session(tmp_sessions_dir, first, "First")
+    _write_claude_session(tmp_sessions_dir, second, "Second")
+
+    rc, out, err = _run_inproc(
+        ["read", "--agent", "claude", "46d7b4fc"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+
+    assert rc == 2
+    assert "ambiguous session prefix" in err
+    assert first in err
+    assert second in err
+
+
+def test_cli_read_missing_short_claude_uuid(
+    tmp_sessions_dir: Path,
+) -> None:
+    _write_claude_session(
+        tmp_sessions_dir,
+        "46d7b4fc-70bc-4cb9-90f4-bca5e0c7e51a",
+        "Existing",
+    )
+
+    rc, out, err = _run_inproc(
+        ["read", "--agent", "claude", "00000000"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+
     assert rc == 3
     assert "not found" in err.lower()
 

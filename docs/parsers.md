@@ -13,18 +13,18 @@ this file.
 | codex        | yes            | yes                 | Fully working.                         |
 | opencode     | yes            | yes                 | Reads message bodies from `part` table.|
 | pi           | yes            | yes (sparse)        | Working; many system/meta-only rows.   |
-| antigravity  | 0 on dev box   | n/a                 | CI-only — see below.                   |
+| antigravity  | optional       | optional            | Real-data smoke skips when absent.     |
 
 Status confirmed 2026-06-21 via `ai-reader list` / `ai-reader read
 --messages` against real session stores.
 
-### Antigravity (CI-only, deferred)
+### Antigravity (optional real-data smoke)
 
-No real Antigravity brain on the dev box; correctness is covered by
-fixture unit tests ([test_antigravity.py](../tests/test_parsers/test_antigravity.py)
-plus the `fake_antigravity_brain` fixture in
-[conftest.py](../tests/conftest.py)). Live validation deferred until
-real data is available.
+Antigravity correctness is covered by fixture unit tests
+([test_antigravity.py](../tests/test_parsers/test_antigravity.py) plus the
+`fake_antigravity_brain` fixture in [conftest.py](../tests/conftest.py)).
+When a host has a real `~/.gemini/antigravity*/brain` tree, the same test
+module runs read-only smoke coverage against one parseable real brain.
 
 ### OpenCode (message bodies in `part` table)
 

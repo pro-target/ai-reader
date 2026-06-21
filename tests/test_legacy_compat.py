@@ -194,6 +194,26 @@ def test_audit_id_with_agent_invokes_read(monkeypatch, clean_argv):
     assert calls == [["ai-reader", "read", "--agent", "opencode", "ses_abc"]]
 
 
+def test_audit_id_with_agent_and_fuzzy_invokes_read(monkeypatch, clean_argv):
+    _available(monkeypatch)
+    calls: List[List[str]] = []
+    monkeypatch.setattr(legacy_compat.subprocess, "run", _stub_run(calls, returncode=0))
+    _set_argv("--id", "46d7b4fc", "--agent", "CLAUDE", "--fuzzy")
+    rc = legacy_compat.run_legacy_agent_audit()
+    assert rc == 0
+    assert calls == [["ai-reader", "read", "--agent", "claude", "46d7b4fc"]]
+
+
+def test_audit_id_with_fuzzy_invokes_cross_agent_read(monkeypatch, clean_argv):
+    _available(monkeypatch)
+    calls: List[List[str]] = []
+    monkeypatch.setattr(legacy_compat.subprocess, "run", _stub_run(calls, returncode=0))
+    _set_argv("--id", "46d7b4fc", "--fuzzy")
+    rc = legacy_compat.run_legacy_agent_audit()
+    assert rc == 0
+    assert calls == [["ai-reader", "read", "46d7b4fc"]]
+
+
 def test_audit_no_args_invokes_list(monkeypatch, clean_argv):
     _available(monkeypatch)
     calls: List[List[str]] = []

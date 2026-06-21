@@ -5,11 +5,10 @@ suite stays fast and hermetic.  We still call the registered tool
 functions exactly as a real MCP client would: through
 ``client.call_tool`` and ``client.list_tools``.
 
-Helper functions (``_extract_messages_claude``,
-``_extract_messages_codex``, ``_iso``, ``_coerce_agent`` etc.) are
-imported and tested directly because the in-memory transport runs
-the server in a side thread whose coverage is *not* attributed to
-the test process.
+Helper functions (``_extract_messages``, ``_iso``, ``_coerce_agent`` etc.)
+are imported and tested directly because the in-memory transport runs
+the server in a side thread whose coverage is *not* attributed to the
+test process.
 """
 from __future__ import annotations
 
@@ -27,9 +26,6 @@ from ai_reader.mcp_server import (
     _codex_text,
     _coerce_agent,
     _extract_messages,
-    _extract_messages_claude,
-    _extract_messages_codex,
-    _extract_messages_pi,
     _iso,
     _MESSAGES_CAP,
     _pi_text,
@@ -246,103 +242,6 @@ def test_session_summary_projects_fields() -> None:
     assert summary["message_count"] == 3
 
 
-# --- _extract_messages_claude ----------------------------------------------
-
-
-def test_extract_messages_claude_basic(tmp_path: Path) -> None:
-    p = tmp_path / "session.jsonl"
-    p.write_text(
-        '{"type":"user","message":{"role":"user","content":"hi"}}\n'
-        '{"type":"assistant","message":{"role":"assistant","content":"hello"}}\n'
-        '{"type":"queue-operation","operation":"enqueue"}\n',
-        encoding="utf-8",
-    )
-    msgs = _extract_messages_claude(str(p))
-    assert len(msgs) == 2
-    assert msgs[0] == {"role": "user", "content": "hi"}
-    assert msgs[1] == {"role": "assistant", "content": "hello"}
-
-
-def test_extract_messages_claude_handles_malformed(tmp_path: Path) -> None:
-    p = tmp_path / "session.jsonl"
-    p.write_text(
-        "not-json-line\n"
-        '{"type":"user","message":{"role":"user","content":"x"}}\n',
-        encoding="utf-8",
-    )
-    msgs = _extract_messages_claude(str(p))
-    assert len(msgs) == 1
-    assert msgs[0]["content"] == "x"
-
-
-def test_extract_messages_claude_empty_file(tmp_path: Path) -> None:
-    p = tmp_path / "session.jsonl"
-    p.write_text("", encoding="utf-8")
-    assert _extract_messages_claude(str(p)) == []
-
-
-def test_extract_messages_claude_content_list(tmp_path: Path) -> None:
-    """``content`` is a list of parts; only ``text`` parts contribute to
-    the concatenated content.  ``tool_use`` parts are routed to the
-    structured ``tool_use`` field on the underlying :class:`Message` and
-    do not leak their ``text`` into ``content`` (the MCP shim projects
-    only ``text`` into ``content``)."""
-    p = tmp_path / "session.jsonl"
-    p.write_text(
-        '{"type":"assistant","message":{"role":"assistant","content":['
-        '{"type":"text","text":"a"},'
-        '{"type":"text","text":"b"},'
-        '{"type":"tool_use","name":"Bash","input":"ls"}'
-        ']}}\n',
-        encoding="utf-8",
-    )
-    msgs = _extract_messages_claude(str(p))
-    assert msgs[0]["content"] == "a\nb"
-
-
-def test_extract_messages_claude_missing_file(tmp_path: Path) -> None:
-    """An OSError (file gone) returns whatever was collected so far."""
-    msgs = _extract_messages_claude(str(tmp_path / "nope.jsonl"))
-    assert msgs == []
-
-
-# --- _extract_messages_codex -----------------------------------------------
-
-
-def test_extract_messages_codex_basic(tmp_path: Path) -> None:
-    p = tmp_path / "rollout.jsonl"
-    p.write_text(
-        '{"type":"session_meta","payload":{"id":"x"}}\n'
-        '{"type":"response_item","payload":{"type":"message","role":"user",'
-        '"content":[{"type":"text","text":"hi"}]}}\n'
-        '{"type":"response_item","payload":{"type":"message","role":"assistant",'
-        '"content":[{"type":"text","text":"hello"}]}}\n',
-        encoding="utf-8",
-    )
-    msgs = _extract_messages_codex(str(p))
-    assert len(msgs) == 2
-    assert msgs[0] == {"role": "user", "content": "hi"}
-
-
-def test_extract_messages_codex_handles_malformed(tmp_path: Path) -> None:
-    p = tmp_path / "rollout.jsonl"
-    p.write_text(
-        "garbage\n"
-        '{"type":"response_item","payload":{"type":"message","role":"user",'
-        '"content":[{"type":"text","text":"real"}]}}\n',
-        encoding="utf-8",
-    )
-    msgs = _extract_messages_codex(str(p))
-    assert len(msgs) == 1
-    assert msgs[0]["content"] == "real"
-
-
-def test_extract_messages_codex_empty_file(tmp_path: Path) -> None:
-    p = tmp_path / "rollout.jsonl"
-    p.write_text("", encoding="utf-8")
-    assert _extract_messages_codex(str(p)) == []
-
-
 def test_codex_text_variants() -> None:
     assert _codex_text([{"type": "text", "text": "a"}]) == "a"
     assert _codex_text([{"text": "no-type"}]) == "no-type"
@@ -352,45 +251,6 @@ def test_codex_text_variants() -> None:
     assert _codex_text(None) == ""  # type: ignore[arg-type]
     assert _codex_text(123) == ""  # type: ignore[arg-type]
     assert _codex_text([]) == ""
-
-
-# --- _extract_messages_pi ---------------------------------------------------
-
-
-def test_extract_messages_pi_basic(tmp_path: Path) -> None:
-    p = tmp_path / "session.jsonl"
-    p.write_text(
-        '{"type":"session","id":"x"}\n'
-        '{"type":"message","message":{"role":"user",'
-        '"content":[{"type":"text","text":"hi"}]}}\n'
-        '{"type":"message","message":{"role":"assistant",'
-        '"content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"hello"}]}}\n'
-        '{"type":"message","message":{"role":"toolResult","content":"ignored"}}\n',
-        encoding="utf-8",
-    )
-    msgs = _extract_messages_pi(str(p))
-    assert len(msgs) == 2
-    assert msgs[0] == {"role": "user", "content": "hi"}
-    assert msgs[1] == {"role": "assistant", "content": "hello"}
-
-
-def test_extract_messages_pi_handles_malformed(tmp_path: Path) -> None:
-    p = tmp_path / "session.jsonl"
-    p.write_text(
-        "garbage\n"
-        '{"type":"message","message":{"role":"user",'
-        '"content":[{"type":"text","text":"real"}]}}\n',
-        encoding="utf-8",
-    )
-    msgs = _extract_messages_pi(str(p))
-    assert len(msgs) == 1
-    assert msgs[0]["content"] == "real"
-
-
-def test_extract_messages_pi_empty_file(tmp_path: Path) -> None:
-    p = tmp_path / "session.jsonl"
-    p.write_text("", encoding="utf-8")
-    assert _extract_messages_pi(str(p)) == []
 
 
 def test_pi_text_variants() -> None:
@@ -709,6 +569,70 @@ def test_read_session_pagination_negative_offset_rejected(
     )
     result = read_session(uuid="test-claude-1", agent="claude", offset=-1)
     assert result.get("error") == "invalid_argument"
+
+
+def test_read_session_claude_tool_only_messages_not_blank(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = [
+        {
+            "type": "ai-title",
+            "aiTitle": "Tool only projection",
+            "timestamp": "2026-06-14T09:59:59Z",
+            "sessionId": "tool-only-1",
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "name": "Bash", "input": "ls"}],
+            },
+            "timestamp": "2026-06-14T10:00:00Z",
+            "sessionId": "tool-only-1",
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "content": "ok"}],
+            },
+            "timestamp": "2026-06-14T10:00:01Z",
+            "sessionId": "tool-only-1",
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "done"}],
+            },
+            "timestamp": "2026-06-14T10:00:02Z",
+            "sessionId": "tool-only-1",
+        },
+    ]
+    jsonl = (
+        tmp_sessions_dir
+        / ".claude"
+        / "projects"
+        / "proj-tools"
+        / "tool-only-1.jsonl"
+    )
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    jsonl.write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+
+    result = read_session(uuid="tool-only-1", agent="claude")
+    msgs = result["messages"]
+    assert msgs == [
+        {"role": "assistant", "content": "[tool_use: Bash]"},
+        {"role": "user", "content": "[tool_result]"},
+        {"role": "assistant", "content": "done"},
+    ]
+    assert all(m["content"] for m in msgs)
 
 
 def test_read_session_mcp_drops_tool_messages(

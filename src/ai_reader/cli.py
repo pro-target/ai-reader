@@ -222,6 +222,41 @@ def _exit_with_error(message: str, code: int = 1) -> "int":
     return code
 
 
+def _session_prefix_keys(session: Session) -> set[str]:
+    keys = {session.uuid}
+    path_stem = Path(session.path).stem
+    if path_stem:
+        keys.add(path_stem)
+    return keys
+
+
+def _find_prefix_matches(
+    agent_name: AgentName, parser: Any, uuid: str
+) -> List[tuple[AgentName, Any, Session]]:
+    matches: List[tuple[AgentName, Any, Session]] = []
+    for session in parser.list_sessions():
+        if any(key.startswith(uuid) for key in _session_prefix_keys(session)):
+            matches.append((agent_name, parser, session))
+    return matches
+
+
+def _format_candidate(session: Session) -> str:
+    return f"{session.uuid} ({session.agent.value}, {session.path})"
+
+
+def _read_exact_matches(
+    targets: Sequence[AgentName], uuid: str
+) -> List[tuple[AgentName, Any, Session]]:
+    matches: List[tuple[AgentName, Any, Session]] = []
+    for agent_name in targets:
+        parser = _PARSERS[agent_name]
+        try:
+            matches.append((agent_name, parser, parser.read_session(uuid)))
+        except FileNotFoundError:
+            continue
+    return matches
+
+
 def _messages_to_dicts(messages: Sequence[Any]) -> List[dict[str, Any]]:
     """Flatten :class:`Message` objects to plain dicts for display/JSON."""
     out: List[dict[str, Any]] = []
@@ -271,15 +306,37 @@ def _run_list(args: argparse.Namespace) -> int:
 def _run_read(args: argparse.Namespace) -> int:
     try:
         uuid = _validate_uuid(args.uuid)
-        agent_name = _coerce_agent(args.agent)
+        targets = _target_agents(args.agent)
     except ValueError as exc:
         return _exit_with_error(str(exc))
 
-    parser = _PARSERS[agent_name]
     try:
-        session = parser.read_session(uuid)
-    except FileNotFoundError as exc:
-        return _exit_with_error(f"not found: {exc}", code=3)
+        matches = _read_exact_matches(targets, uuid)
+        if not matches:
+            for agent_name in targets:
+                parser = _PARSERS[agent_name]
+                matches.extend(_find_prefix_matches(agent_name, parser, uuid))
+        if not matches:
+            scope = args.agent or "any supported agent"
+            return _exit_with_error(
+                f"not found: session {uuid!r} under {scope}",
+                code=3,
+            )
+        if len(matches) > 1:
+            candidates = "\n".join(
+                f"  - {_format_candidate(match[2])}" for match in matches[:20]
+            )
+            more = (
+                ""
+                if len(matches) <= 20
+                else f"\n  ... and {len(matches) - 20} more"
+            )
+            return _exit_with_error(
+                f"ambiguous session prefix {uuid!r}; candidates:\n{candidates}{more}",
+                code=2,
+            )
+        agent_name, parser, session = matches[0]
+        uuid = session.uuid
     except ValueError as exc:
         return _exit_with_error(str(exc))
 
@@ -381,9 +438,8 @@ def build_parser() -> argparse.ArgumentParser:
     read_p.add_argument("uuid", help="Session uuid (validated against [A-Za-z0-9_.-]).")
     read_p.add_argument(
         "--agent",
-        required=True,
         choices=_AGENT_CHOICES,
-        help="Which agent owns the session.",
+        help="Which agent owns the session (default: try all).",
     )
     read_p.add_argument(
         "--json",

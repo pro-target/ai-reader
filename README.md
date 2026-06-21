@@ -30,11 +30,6 @@ cannot:
   session, hand it the previous session's UUID, and say "continue from
   here." The prior transcript is readable regardless of which agent
   wrote it.
-- **Need a session audit? Dispatch a reviewer.** Send an agent to read
-  any past session and check it against your bar: solution logic (could
-  it be better?), security, completeness (did it actually cover *every*
-  requirement, not just the loud ones?), component boundaries / DRY,
-  and whatever else your team cares about.
 - **Cross-agent handoff & triage.** "What did the other agent do on
   this?" works across Claude, Codex, OpenCode, Antigravity, and Pi
   without learning five different log layouts.
@@ -49,7 +44,7 @@ cd ~/dev/ai-reader && bash install.sh
 That's it. The installer:
 - Detects install mode (system-wide with sudo, or per-user without)
 - Creates a venv, installs the package
-- Patches MCP configs for **Claude**, **Codex**, **OpenCode**, **Antigravity**
+- Prints MCP config snippets for **Claude**, **Codex**, **OpenCode**, **Antigravity**
 - Runs smoke tests
 
 ## Supported Agents
@@ -80,11 +75,11 @@ That's it. The installer:
 
 ## Design boundaries
 
-`ai-reader` (this library) stays separate from the `~/.agents` skills monorepo — the GitHub `pro-target` org groups them; no merge. The public API grows first (message + tool-call access); migration of consumers off the legacy wrapper scripts is deferred until the library reaches feature parity.
+`ai-reader` is the public core: parsers, typed messages, CLI, and MCP. Workflow-specific reviewers, summaries, and audits live outside this repo and consume the parser API (`read_messages`).
 
 ## Known limitations
 
-- **Antigravity** — no real Antigravity brain on the dev box; correctness is covered only by fixture unit tests. Live validation deferred until real data is available.
+- **Antigravity** — fixture coverage plus optional real-data smoke tests when a local brain directory exists.
 
 See [docs/parsers.md](docs/parsers.md) for the full parser-coverage matrix.
 
