@@ -306,6 +306,119 @@ def test_message_is_frozen(fake_claude_session: Path, tmp_sessions_dir: Path) ->
 
 
 # ---------------------------------------------------------------------------
+# Incremental (byte-offset) reads
+# ---------------------------------------------------------------------------
+
+
+def test_read_session_incremental(tmp_sessions_dir: Path) -> None:
+    base = tmp_sessions_dir / ".claude" / "projects" / "proj-a"
+    base.mkdir(parents=True, exist_ok=True)
+    jsonl = base / "incremental.jsonl"
+    records: list[dict] = []
+    for i in range(10):
+        records.append(
+            {
+                "type": "user" if i % 2 == 0 else "assistant",
+                "message": {
+                    "role": "user" if i % 2 == 0 else "assistant",
+                    "content": f"msg-{i}",
+                },
+                "timestamp": f"2026-06-14T10:00:{i:02d}Z",
+                "sessionId": "incremental",
+            }
+        )
+    jsonl.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+
+    base_dir = str(tmp_sessions_dir / ".claude" / "projects")
+    initial_size = jsonl.stat().st_size
+
+    msgs1, offset1 = claude.read_session_incremental("incremental", base_dir=base_dir)
+    assert len(msgs1) == 10
+    assert offset1 == initial_size
+    assert msgs1[0].text == "msg-0"
+    assert msgs1[9].text == "msg-9"
+
+    with jsonl.open("a", encoding="utf-8") as fh:
+        for i in range(10, 13):
+            fh.write(
+                json.dumps(
+                    {
+                        "type": "user" if i % 2 == 0 else "assistant",
+                        "message": {
+                            "role": "user" if i % 2 == 0 else "assistant",
+                            "content": f"msg-{i}",
+                        },
+                        "timestamp": f"2026-06-14T10:00:{i:02d}Z",
+                        "sessionId": "incremental",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+    new_size = jsonl.stat().st_size
+    assert new_size > initial_size
+
+    msgs2, offset2 = claude.read_session_incremental(
+        "incremental", from_offset=offset1, base_dir=base_dir
+    )
+    assert len(msgs2) == 3
+    assert offset2 == new_size
+    assert msgs2[0].text == "msg-10"
+    assert msgs2[1].text == "msg-11"
+    assert msgs2[2].text == "msg-12"
+
+
+def test_incremental_empty_initial(tmp_sessions_dir: Path) -> None:
+    base = tmp_sessions_dir / ".claude" / "projects" / "proj-a"
+    base.mkdir(parents=True, exist_ok=True)
+    jsonl = base / "empty-initial.jsonl"
+    jsonl.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "x"},
+                "timestamp": "2026-06-14T10:00:00Z",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    base_dir = str(tmp_sessions_dir / ".claude" / "projects")
+    size = claude.get_session_size("empty-initial", base_dir=base_dir)
+    assert size == jsonl.stat().st_size
+    msgs, offset = claude.read_session_incremental(
+        "empty-initial", from_offset=size, base_dir=base_dir
+    )
+    assert msgs == []
+    assert offset == size
+
+
+def test_get_session_size_matches_stat(tmp_sessions_dir: Path) -> None:
+    base = tmp_sessions_dir / ".claude" / "projects" / "proj-a"
+    base.mkdir(parents=True, exist_ok=True)
+    jsonl = base / "sized.jsonl"
+    jsonl.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "y"},
+                "timestamp": "2026-06-14T10:00:00Z",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    base_dir = str(tmp_sessions_dir / ".claude" / "projects")
+    assert claude.get_session_size("sized", base_dir=base_dir) == jsonl.stat().st_size
+
+
+# ---------------------------------------------------------------------------
 # extract_title priority chain
 # ---------------------------------------------------------------------------
 

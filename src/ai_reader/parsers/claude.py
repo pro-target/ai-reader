@@ -441,6 +441,56 @@ def read_messages(
     return _extract_messages_from_jsonl(Path(session.path))
 
 
+def get_session_size(uuid: str, base_dir: Optional[str] = None) -> int:
+    """Return the on-disk byte size of the JSONL file backing ``uuid``.
+
+    Useful for incremental readers: a caller that knows the
+    ``new_offset`` returned by :func:`read_session_incremental` can poll
+    this to decide whether the agent has appended more data.  Returns
+    ``0`` if the file's size cannot be determined.
+    """
+    path = _find_session_file(uuid, base_dir)
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def read_session_incremental(
+    uuid: str,
+    from_offset: int = 0,
+    base_dir: Optional[str] = None,
+) -> Tuple[List[Message], int]:
+    """Read Claude-session messages from ``from_offset`` to end of file.
+
+    Opens the JSONL file in binary mode, seeks to ``from_offset``, and
+    parses every line that follows.  Returns ``(messages, new_offset)``
+    where ``new_offset`` is the byte position immediately after the last
+    byte read — pass it back in on the next call to fetch only the
+    delta.
+
+    An :class:`OSError` while reading returns whatever messages were
+    collected up to the failure point along with the current offset.
+    ``FileNotFoundError`` from path resolution still propagates.
+    """
+    path = _find_session_file(uuid, base_dir)
+    messages: List[Message] = []
+    new_offset = max(from_offset, 0)
+    try:
+        with path.open("rb") as fh:
+            fh.seek(new_offset)
+            for raw_line in fh:
+                msg = _parse_jsonl_line(
+                    raw_line.decode("utf-8", errors="replace")
+                )
+                if msg is not None:
+                    messages.append(msg)
+            new_offset = fh.tell()
+    except OSError:
+        return messages, new_offset
+    return messages, new_offset
+
+
 def search(query: str, base_dir: Optional[str] = None) -> List[Session]:
     """Case-insensitive substring search across Claude session titles."""
     needle = (query or "").strip().lower()
