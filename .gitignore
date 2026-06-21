@@ -43,3 +43,6 @@ data/
 
 # Install target
 /opt/ai-reader/
+
+# Agent-local memory (serena, etc.) — not for repo
+.serena/
