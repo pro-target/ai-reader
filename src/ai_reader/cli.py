@@ -421,6 +421,73 @@ def _run_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_export_rounds(args: argparse.Namespace) -> int:
+    try:
+        uuid = _validate_uuid(args.uuid)
+        targets = _target_agents(args.agent)
+    except ValueError as exc:
+        return _exit_with_error(str(exc))
+
+    try:
+        matches = _read_exact_matches(targets, uuid)
+        if not matches:
+            for agent_name in targets:
+                parser = _PARSERS[agent_name]
+                matches.extend(_find_prefix_matches(agent_name, parser, uuid))
+        if not matches:
+            scope = args.agent or "any supported agent"
+            return _exit_with_error(
+                f"not found: session {uuid!r} under {scope}",
+                code=3,
+            )
+        if len(matches) > 1:
+            candidates = "\n".join(
+                f"  - {_format_candidate(match[2])}" for match in matches[:20]
+            )
+            more = (
+                ""
+                if len(matches) <= 20
+                else f"\n  ... and {len(matches) - 20} more"
+            )
+            return _exit_with_error(
+                f"ambiguous session prefix {uuid!r}; candidates:\n{candidates}{more}",
+                code=2,
+            )
+        agent_name, parser, session = matches[0]
+        uuid = session.uuid
+    except ValueError as exc:
+        return _exit_with_error(str(exc))
+
+    messages: Optional[List[Any]] = None
+    if args.include_round:
+        read_messages = getattr(parser, "read_messages", None)
+        if read_messages is None:
+            print(
+                f"ai-reader: read_messages unavailable for {agent_name.value}",
+                file=sys.stderr,
+            )
+        else:
+            try:
+                messages = list(read_messages(uuid))
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"ai-reader: failed to read messages: {exc}",
+                    file=sys.stderr,
+                )
+                messages = []
+
+    from ai_reader.exporters.rounds import session_to_rounds
+
+    markdown = session_to_rounds(session, messages=messages)
+
+    output = getattr(args, "output", None)
+    if output:
+        Path(output).write_text(markdown, encoding="utf-8")
+    else:
+        sys.stdout.write(markdown)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the top-level argument parser."""
     parser = argparse.ArgumentParser(
@@ -493,6 +560,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print just the agent name (e.g. 'claude').",
     )
     detect_p.set_defaults(func=_run_detect_agent)
+
+    export_p = sub.add_parser(
+        "export", help="Render a session into an external format."
+    )
+    export_sub = export_p.add_subparsers(dest="export_format", required=True)
+
+    rounds_p = export_sub.add_parser(
+        "rounds",
+        help="Emit work/CHANGELOG.md-compatible markdown from a session.",
+    )
+    rounds_p.add_argument(
+        "uuid", help="Session uuid (validated against [A-Za-z0-9_.-])."
+    )
+    rounds_p.add_argument(
+        "--agent",
+        choices=_AGENT_CHOICES,
+        help="Which agent owns the session (default: try all).",
+    )
+    rounds_p.add_argument(
+        "--output",
+        default=None,
+        metavar="PATH",
+        help="Write markdown to PATH instead of stdout.",
+    )
+    rounds_p.add_argument(
+        "--include-round",
+        action="store_true",
+        help="Include the structured Round block (requires read_messages).",
+    )
+    rounds_p.set_defaults(func=_run_export_rounds)
 
     return parser
 
