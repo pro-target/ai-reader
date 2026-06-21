@@ -1,4 +1,4 @@
-# TODO — ai-reader (as of 2026-06-21, updated after audit session 13163330)
+# TODO — ai-reader (as of 2026-06-22, updated after session d7f4db03)
 
 Read `_docs/handoff/2026-06-21_session-end.md` first for full context
 (8-PR session). The addendum at the bottom of that file covers the
@@ -6,17 +6,6 @@ follow-up git-audit session `13163330`.
 
 ## NOW (do before anything else next session)
 
-- [ ] **Commit session 13163330's test-recovery + safe-fix work.** This
-      is the entire current uncommitted working tree (7 files):
-      `.github/workflows/ci.yml`, `src/ai_reader/cli.py`,
-      `tests/exporters/test_rounds.py`,
-      `tests/test_parsers/{test_codex,test_opencode,test_registry}.py`,
-      `tests/test_session.py`. **345 tests pass** (verified).
-      Confirm `git status` holds no secrets. Recommended single commit
-      subject: `test: recover coverage after access-control removal
-      (+ CI perms, dedup fix)`. The 8 PRs from the prior session are
-      already committed (agents/exporters/templates/search/multi-candidate
-      are tracked, absent from working tree).
 - [ ] **Bad-JSON handling for 4 other parsers** (claude/opencode/
       antigravity/pi). The dropped-line branch currently does a bare
       `continue`; wiring it to the PR4 sink module (`parsers/_quarantine.py`)
@@ -59,6 +48,17 @@ follow-up git-audit session `13163330`.
 
 ## DONE
 
+- [x] **session 13163330 test-recovery + safe-fix** — committed as `775a7c6`
+      (`test: recover coverage after access-control removal (+ CI perms, dedup fix)`).
+      Was the uncommitted working tree (7 files); 345 pass.
+- [x] **MCP read_session ValueError → invalid_argument** (`d8bcbb5`, session
+      d7f4db03) — parser uuid-validation `ValueError` now surfaced as a
+      structured error dict instead of an uncaught server error.
+- [x] **Consolidate triplicated agent registry** (`a30666e`, session d7f4db03)
+      — `PARSERS`/`coerce_agent`/`target_agents`/`iso` unified into a single
+      canonical impl in `ai_reader.parsers`; `find_file_edits` + `cli` import
+      from there (re-export + aliased imports preserved). -91/+63, 71 lines of
+      dup removed. 345 pass.
 - [x] 8 PRs from prior session — landed/committed (agents, exporters/rounds,
       templates+validator, body search, multi-candidate detection; see handoff)
 - [x] git-audit of repo over 24h (session 13163330): 4-zone parallel audit,
