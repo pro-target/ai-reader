@@ -29,7 +29,9 @@ responsibility and depends only on the layer below it.
 layer in front of the parsers: any caller that can reach the CLI,
 the MCP server, or the Python package can read any session. Treat
 the host's session directories as trusted-and-local — the tool does
-not gate who may read what.
+not gate who may read what. What the reader's *caller* does with
+session content is a separate concern: see
+[Security — untrusted session content](security.md).
 
 ## Layer 1 — Public API
 
@@ -87,3 +89,39 @@ Every parser validates the requested `uuid` before touching the
 filesystem: path separators (`/`, `\`), whitespace, and `..`
 (Claude) are rejected with `ValueError`. This keeps `read_session`
 scoped to a single session identifier — no path traversal.
+
+## Decisions
+
+### ADR: access-control removal (`ee72961`)
+
+Commit `ee72961` ("Refactor CLI tests to remove subagent environment
+dependencies") removed the entire `src/ai_reader/access/` module
+(406 LOC: guard / detector / models / proc / `__init__`),
+`tests/test_access/` (613 LOC, 5 files), `docs/access-control.md`,
+`examples/custom_detector.py`, and the `is_caller_subagent` gate in
+`legacy_compat.py`. Net 332+/1917−.
+
+**Decision:** the removal stands. The repo is public, so
+caller-authorization ("may this caller read this session") is
+redundant — any caller that reaches the CLI/MCP/SDK may already read
+any session the host can read. Authorization would only re-add a gate
+in front of data that is, by design, world-readable on the host.
+
+Identity ("which session is mine") is an **orthogonal** concern,
+handled by `session.py` multi-candidate detection (commit `4dbb438`),
+not by authorization.
+
+**Commit-hygiene note:** the removal was framed inside a test-refactor
+commit message. The *decision* is sound; the *message* was misleading.
+This ADR records it so future reviewers do not re-derive or re-audit
+the removal.
+
+**Revisit trigger:** only if the repo becomes private or gains a
+threat model where host-local readers are not equivalent. The separate
+content-trust concern (what a reader's caller does with session text)
+is covered in [Security](security.md) and is unaffected by this
+decision.
+
+**Audit trail:** removal audited by session `13163330` (report:
+`/tmp/audit-13163330-.../reports/report.md`); coverage recovered in
+commit `775a7c6` (17 regression tests).

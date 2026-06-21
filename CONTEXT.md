@@ -49,11 +49,10 @@ Any base directory can be overridden by setting `AI_READER_HOME`.
 
 ## Known limitations
 
-- **OpenCode message bodies**: current OpenCode builds store message text
-  in a separate `part` table (keyed by `message_id`), while `message.data`
-  carries only metadata (role, tokens, cost). The parser reads
-  `message.data` only, so real-world sessions return empty message text
-  even though rows exist. The parser is covered by current-shape
-  (`message.data`-inline-parts) tests; pre-AI-SDK / separate-`part`-table
-  shapes are unverified on the dev box and need a follow-up to join
-  `part.data`.
+- **OpenCode message bodies**: real-world OpenCode DBs store message
+  text and tool calls in a separate `part` table (keyed by
+  `message_id`), while `message.data` carries only metadata. The
+  parser joins `part` (commit `6b3cfb4`) and assembles `text` from
+  `text`/`reasoning` parts, `tool_use`/`tool_result` from `tool`
+  parts; legacy DBs without a `part` table fall back to
+  `message.data`-inline parts.

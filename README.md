@@ -80,6 +80,8 @@ That's it. The installer:
 
 `ai-reader` is the public core: parsers, typed messages, CLI, and MCP. Workflow-specific reviewers, summaries, and audits live outside this repo and consume the parser API (`read_messages`).
 
+Session content is **untrusted** — a reader's caller (auditor, summarizer, replay agent) must treat it as data, not instructions. See [Security — untrusted session content](docs/security.md).
+
 ## Known limitations
 
 - **Antigravity** — fixture coverage plus optional real-data smoke tests when a local brain directory exists.
