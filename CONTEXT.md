@@ -46,3 +46,14 @@ Any base directory can be overridden by setting `AI_READER_HOME`.
 
 - This project's canonical docs: [README.md](./README.md), [CHANGELOG.md](./CHANGELOG.md)
 - Open issues: <https://github.com/pro-target/ai-reader/issues>
+
+## Known limitations
+
+- **OpenCode message bodies**: current OpenCode builds store message text
+  in a separate `part` table (keyed by `message_id`), while `message.data`
+  carries only metadata (role, tokens, cost). The parser reads
+  `message.data` only, so real-world sessions return empty message text
+  even though rows exist. The parser is covered by current-shape
+  (`message.data`-inline-parts) tests; pre-AI-SDK / separate-`part`-table
+  shapes are unverified on the dev box and need a follow-up to join
+  `part.data`.
