@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import shlex
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
@@ -30,28 +29,16 @@ if str(_SRC) not in sys.path:
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from ai_reader import __version__  # noqa: E402
-from ai_reader.parsers import AgentName, Session  # noqa: E402
-from ai_reader.parsers import antigravity, claude, codex, opencode, pi  # noqa: E402
+from ai_reader.find_file_edits import (  # noqa: E402
+    PARSERS as _PARSERS,
+    coerce_agent as _coerce_agent,
+    find_file_edits as _find_file_edits_core,
+    iso as _iso,
+    target_agents as _target_agents,
+)
+from ai_reader.parsers import Session  # noqa: E402
 
 __all__ = ["mcp", "main"]
-
-
-_PARSERS = {
-    AgentName.CLAUDE: claude,
-    AgentName.CODEX: codex,
-    AgentName.OPENCODE: opencode,
-    AgentName.ANTIGRAVITY: antigravity,
-    AgentName.PI: pi,
-}
-
-
-_AGENT_NAMES_LOWER: dict[str, AgentName] = {
-    "claude": AgentName.CLAUDE,
-    "codex": AgentName.CODEX,
-    "opencode": AgentName.OPENCODE,
-    "antigravity": AgentName.ANTIGRAVITY,
-    "pi": AgentName.PI,
-}
 
 
 _MESSAGES_CAP = 100
@@ -66,24 +53,6 @@ mcp = FastMCP(
 )
 
 
-def _coerce_agent(name: str) -> AgentName:
-    """Map a lowercase agent name to :class:`AgentName`."""
-    key = (name or "").strip().lower()
-    if key not in _AGENT_NAMES_LOWER:
-        raise ValueError(
-            f"unknown agent {name!r}; expected one of "
-            f"{sorted(_AGENT_NAMES_LOWER)}"
-        )
-    return _AGENT_NAMES_LOWER[key]
-
-
-def _iso(date: datetime) -> str:
-    """Format a datetime as ISO-8601 with UTC fallback."""
-    if date.tzinfo is None:
-        return date.replace(tzinfo=None).isoformat() + "Z"
-    return date.isoformat()
-
-
 def _session_summary(session: Session) -> dict[str, Any]:
     """Project a :class:`Session` to a JSON-safe summary dict."""
     return {
@@ -93,13 +62,6 @@ def _session_summary(session: Session) -> dict[str, Any]:
         "date": _iso(session.date),
         "message_count": session.message_count,
     }
-
-
-def _target_agents(agent: Optional[str]) -> List[AgentName]:
-    """Resolve the optional ``agent`` filter to a list of :class:`AgentName`."""
-    if agent is None or not str(agent).strip():
-        return list(_PARSERS.keys())
-    return [_coerce_agent(agent)]
 
 
 def _codex_text(parts: object) -> str:
@@ -307,6 +269,33 @@ def read_session(
     summary["offset"] = offset
     summary["limit"] = limit
     return summary
+
+
+@mcp.tool()
+def find_file_edits(
+    path: str,
+    agent: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Find every file edit across sessions, cross-agent by default.
+
+    Thin wrapper over :func:`ai_reader.find_file_edits.find_file_edits`
+    that translates the core ``ValueError`` contract into the
+    ``{"error": "invalid_argument", "message": str(exc)}`` shape the
+    MCP client expects.
+    """
+    try:
+        return _find_file_edits_core(
+            path=path,
+            agent=agent,
+            since=since,
+            until=until,
+            limit=limit,
+        )
+    except ValueError as exc:
+        return {"error": "invalid_argument", "message": str(exc)}
 
 
 @mcp.tool()

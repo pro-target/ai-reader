@@ -99,6 +99,7 @@ class Message:
     text: str
     tool_use: Tuple[dict, ...] = ()
     tool_result: Tuple[dict, ...] = ()
+    timestamp: Optional[datetime] = None
 
 
 __all__ = ["AgentName", "Message", "Session"]

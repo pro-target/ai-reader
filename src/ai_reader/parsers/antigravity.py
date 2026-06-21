@@ -57,6 +57,15 @@ _TRANSCRIPT_CANDIDATES: tuple[str, ...] = (
 )
 _OVERVIEW = ".system_generated/logs/overview.txt"
 
+_TOOL_PART_TYPES: frozenset[str] = frozenset({
+    "MODEL_TOOL_CALL",
+    "TOOL_CALL",
+    "tool_call",
+    "toolCall",
+    "tool_use",
+    "TOOL_USE",
+})
+
 
 def _resolve_brain_roots(
     base_dir: Optional[str] = None,
@@ -283,8 +292,20 @@ def _antigravity_message_from_record(record: dict) -> Optional[Message]:
     fields rather than an explicit ``role``.  We map ``USER_*`` records
     to ``user`` and ``MODEL_*`` records to ``assistant``.  Text comes
     from the ``content`` field; tool structure is best-effort because
-    Antigravity transcripts are heterogeneous.  Returns ``None`` when
-    the record cannot be classified.
+    Antigravity transcripts are heterogeneous.
+
+    Tool calls may appear in three shapes (all normalised to
+    ``tool_use`` entries):
+
+    1. ``content`` is a list of parts, one of which has
+       ``type`` in :data:`_TOOL_PART_TYPES` — the part carries
+       ``name`` + ``args`` (or ``input``/``arguments``).
+    2. ``content`` is a single dict whose ``type`` is a tool-part
+       type (e.g. raw ``MODEL_TOOL_CALL`` records).
+    3. The record-level ``type`` is itself a tool-part type — the
+       tool spec lives in ``record["name"]``/``record["args"]``.
+
+    Returns ``None`` when the record cannot be classified.
     """
     source = record.get("source", "")
     rtype = record.get("type", "")
@@ -298,20 +319,62 @@ def _antigravity_message_from_record(record: dict) -> Optional[Message]:
         role = "assistant"
     else:
         return None
+    ts = _parse_iso_timestamp(record.get("timestamp", ""))
     content = record.get("content", "")
+    text_chunks: List[str] = []
+    tool_use: List[dict] = []
+    tool_result: List[dict] = []
+
+    def _record_tool(part: dict) -> None:
+        name = part.get("name", "") if isinstance(part, dict) else ""
+        if not isinstance(name, str) or not name:
+            return
+        args = part.get("args", part.get("input", part.get("arguments", "")))
+        if isinstance(args, str):
+            input_str = args
+        else:
+            try:
+                input_str = json.dumps(args, ensure_ascii=False)
+            except (TypeError, ValueError):
+                input_str = str(args)
+        tool_use.append({
+            "name": name,
+            "input": input_str,
+            "timestamp": ts,
+        })
+
     if isinstance(content, list):
-        chunks: List[str] = []
         for part in content:
-            if isinstance(part, dict):
-                t = part.get("text", "")
-                if isinstance(t, str) and t:
-                    chunks.append(t)
-        text = "\n".join(chunks)
+            if not isinstance(part, dict):
+                continue
+            ptype = part.get("type", "")
+            if ptype in _TOOL_PART_TYPES:
+                _record_tool(part)
+                continue
+            t = part.get("text", "")
+            if isinstance(t, str) and t:
+                text_chunks.append(t)
+    elif isinstance(content, dict):
+        if content.get("type", "") in _TOOL_PART_TYPES:
+            _record_tool(content)
     elif isinstance(content, str):
-        text = content
-    else:
-        text = ""
-    return Message(role=role, text=text)
+        if content:
+            text_chunks.append(content)
+
+    # Record-level tool spec: ``type`` itself marks a tool call and the
+    # spec lives in ``name``/``args`` (or ``input``/``arguments``).
+    if isinstance(rtype, str) and rtype in _TOOL_PART_TYPES:
+        _record_tool(record)
+
+    text = "\n".join(text_chunks)
+
+    return Message(
+        role=role,
+        text=text,
+        tool_use=tuple(tool_use),
+        tool_result=tuple(tool_result),
+        timestamp=ts,
+    )
 
 
 def _extract_messages_from_transcript(path: Path) -> List[Message]:

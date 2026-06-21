@@ -353,6 +353,7 @@ def _parse_jsonl_line(line: str) -> Optional[Message]:
     if rec_type not in ("user", "assistant"):
         return None
     payload = record.get("message") or {}
+    ts = _parse_iso_timestamp(record.get("timestamp", ""))
     if not isinstance(payload, dict):
         return None
     content = payload.get("content", "")
@@ -403,6 +404,7 @@ def _parse_jsonl_line(line: str) -> Optional[Message]:
         text="\n".join(text_chunks),
         tool_use=tuple(tool_use),
         tool_result=tuple(tool_result),
+        timestamp=ts,
     )
 
 

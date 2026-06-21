@@ -969,3 +969,242 @@ def test_cli_search_short_op_alias(
     payload = json.loads(out)
     uuids = [item["uuid"] for item in payload]
     assert "ses-alias-1" in uuids
+
+
+# ---------------------------------------------------------------------------
+# find-file-edits
+# ---------------------------------------------------------------------------
+
+
+def _write_claude_edit_session(
+    home: Path,
+    uuid: str,
+    *,
+    user_text: str,
+    edit_path: str,
+    old_string: str = "old",
+    new_string: str = "new",
+    ts_user: str = "2026-06-14T10:00:00Z",
+    ts_edit: str = "2026-06-14T10:00:05Z",
+) -> None:
+    """Minimal Claude JSONL with a user msg + assistant ``Edit`` call."""
+    import json as _json
+
+    path = home / ".claude" / "projects" / "proj-fe" / f"{uuid}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": user_text},
+            "timestamp": ts_user,
+            "sessionId": uuid,
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Editing now."},
+                    {
+                        "type": "tool_use",
+                        "name": "Edit",
+                        "input": {
+                            "file_path": edit_path,
+                            "old_string": old_string,
+                            "new_string": new_string,
+                        },
+                    },
+                ],
+            },
+            "timestamp": ts_edit,
+            "sessionId": uuid,
+        },
+    ]
+    path.write_text(
+        "\n".join(_json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_pi_edit_session(
+    home: Path,
+    uuid: str,
+    *,
+    user_text: str,
+    edit_path: str,
+) -> None:
+    """Minimal Pi JSONL with an assistant ``str_replace`` tool call."""
+    import json as _json
+
+    jsonl = (
+        home
+        / ".pi"
+        / "agent"
+        / "sessions"
+        / "--tmp-fe-cli--"
+        / f"2026-06-14T10-00-00-000Z_{uuid}.jsonl"
+    )
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "type": "session",
+            "id": uuid,
+            "timestamp": "2026-06-14T10:00:00.000Z",
+            "cwd": "/tmp/fe-cli",
+        },
+        {
+            "type": "message",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": user_text}],
+                "timestamp": 1_718_360_002_000,
+            },
+        },
+        {
+            "type": "message",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Replacing now."},
+                    {
+                        "type": "toolCall",
+                        "name": "str_replace",
+                        "arguments": {
+                            "path": edit_path,
+                            "old_string": "old",
+                            "new_string": "new",
+                        },
+                    },
+                ],
+                "timestamp": 1_718_360_004_000,
+            },
+        },
+    ]
+    jsonl.write_text(
+        "\n".join(_json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_cli_find_file_edits_basic(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Human-readable output surfaces the matching edit with intent."""
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-cli-1",
+        user_text="Add the header",
+        edit_path="/tmp/cli-basic/README.md",
+    )
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir",
+        lambda bd=None: Path(str(tmp_sessions_dir / ".claude" / "projects")),
+    )
+    rc, out, err = _run_inproc(
+        ["find-file-edits", "README.md"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    assert "README.md" in out
+    assert "Edit" in out
+    assert "Add the header" in out
+    assert "1 edit" in out
+
+
+def test_cli_find_file_edits_json(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--json`` returns a dict with ``records``/``count``/``truncated``."""
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-cli-json",
+        user_text="json test",
+        edit_path="/tmp/cli-json/src.py",
+    )
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir",
+        lambda bd=None: Path(str(tmp_sessions_dir / ".claude" / "projects")),
+    )
+    rc, out, err = _run_inproc(
+        ["find-file-edits", "src.py", "--json"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    assert "records" in payload
+    assert "count" in payload
+    assert "truncated" in payload
+    assert payload["count"] == 1
+    assert payload["truncated"] is False
+    assert payload["records"][0]["file"] == "/tmp/cli-json/src.py"
+    assert payload["records"][0]["tool"] == "Edit"
+
+
+def test_cli_find_file_edits_invalid_bound(
+    tmp_sessions_dir: Path,
+) -> None:
+    """Garbage ``--since`` -> exit 2 with a stderr message."""
+    rc, out, err = _run_inproc(
+        ["find-file-edits", "anything", "--since", "not-a-date"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 2
+    assert "iso 8601" in err.lower() or "iso" in err.lower()
+
+
+def test_cli_find_file_edits_cross_agent(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ``--agent`` flag scans both Claude and Pi (cross-agent default)."""
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-cli-x",
+        user_text="claude edit", edit_path="/tmp/cli-x/shared.py",
+    )
+    _write_pi_edit_session(
+        tmp_sessions_dir, "pfe-cli-x",
+        user_text="pi edit", edit_path="/tmp/cli-x/shared.py",
+    )
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir",
+        lambda bd=None: Path(str(tmp_sessions_dir / ".claude" / "projects")),
+    )
+    monkeypatch.setattr(
+        "ai_reader.parsers.pi._resolve_base_dir",
+        lambda bd=None: Path(str(tmp_sessions_dir / ".pi" / "agent" / "sessions")),
+    )
+    rc, out, err = _run_inproc(
+        ["find-file-edits", "shared.py", "--json"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    agents = {r["agent"] for r in payload["records"]}
+    assert agents == {"claude", "pi"}
+
+
+def test_cli_find_file_edits_agent_filter(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--agent claude`` returns only Claude rows even when Pi has matches."""
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-cli-f",
+        user_text="claude edit", edit_path="/tmp/cli-f/shared.py",
+    )
+    _write_pi_edit_session(
+        tmp_sessions_dir, "pfe-cli-f",
+        user_text="pi edit", edit_path="/tmp/cli-f/shared.py",
+    )
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir",
+        lambda bd=None: Path(str(tmp_sessions_dir / ".claude" / "projects")),
+    )
+    monkeypatch.setattr(
+        "ai_reader.parsers.pi._resolve_base_dir",
+        lambda bd=None: Path(str(tmp_sessions_dir / ".pi" / "agent" / "sessions")),
+    )
+    rc, out, err = _run_inproc(
+        ["find-file-edits", "shared.py", "--agent", "claude", "--json"],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    assert payload["count"] == 1
+    assert payload["records"][0]["agent"] == "claude"

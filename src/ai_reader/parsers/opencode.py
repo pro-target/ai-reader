@@ -81,6 +81,9 @@ from typing import Iterable, List, Optional, Tuple
 from .models import AgentName, Message, Session
 
 
+_PartTuple = Tuple[dict, Optional[int]]
+
+
 _TITLE_MAX_LEN = 100
 _DEFAULT_DB = "~/.local/share/opencode/opencode.db"
 
@@ -335,7 +338,7 @@ def read_session(
 # older DBs / edge cases.
 _SELECT_MESSAGES_WITH_PARTS = (
     "SELECT m.id AS mid, m.time_created AS mtime, m.data AS mdata, "
-    "p.id AS pid, p.data AS pdata "
+    "p.id AS pid, p.data AS pdata, p.time_created AS ptime "
     "FROM message m "
     "LEFT JOIN part p ON p.message_id = m.id "
     "WHERE m.session_id = ? "
@@ -343,7 +346,7 @@ _SELECT_MESSAGES_WITH_PARTS = (
 )
 _SELECT_MESSAGES_ONLY = (
     "SELECT id AS mid, time_created AS mtime, data AS mdata, "
-    "NULL AS pid, NULL AS pdata "
+    "NULL AS pid, NULL AS pdata, NULL AS ptime "
     "FROM message WHERE session_id = ? "
     "ORDER BY time_created, id"
 )
@@ -423,16 +426,21 @@ def _role_from_message_data(message_data: Optional[dict]) -> Optional[str]:
 
 
 def _build_message(
-    message_data: Optional[dict], parts: List[dict]
+    message_data: Optional[dict],
+    parts: List[_PartTuple],
+    timestamp: Optional[datetime] = None,
 ) -> Optional[Message]:
-    """Assemble a :class:`Message` from metadata + ordered parts.
+    """Assemble a :class:`Message` from metadata + ordered ``(part, ptime)`` tuples.
 
     * ``text``      = concatenation of ``text`` parts + ``reasoning``
                       parts (reasoning inlined unmarked; kept in-order
                       so the dialogue reads naturally — matches how the
                       Codex/Claude parsers fold thinking into text).
     * ``tool_use``  = one entry per ``tool`` part
-                      (``{name: tool, input: state.input}``).
+                      (``{name: tool, input: state.input, timestamp: ...}``).
+                      The per-entry ``timestamp`` is the originating
+                      part's ``time_created`` (UTC-aware); ``None`` when
+                      the row lacked a part-time column.
     * ``tool_result`` = one entry per ``tool`` part that has a
                       ``state.output`` (``{content: state.output}``).
                       Error/running tools without output are omitted
@@ -466,21 +474,30 @@ def _build_message(
                 if ptype in ("text", "input_text", "output_text", "") and isinstance(t, str) and t:
                     text_chunks.append(t)
 
-    for part in parts:
+    for part, ptime in parts:
         ptype = part.get("type", "")
+        ts_for_entry: Optional[datetime] = (
+            _epoch_ms_to_datetime(ptime) if isinstance(ptime, int) else None
+        )
         if ptype in ("text", "reasoning"):
             t = part.get("text", "")
             if isinstance(t, str) and t:
                 text_chunks.append(t)
         elif ptype == "tool":
             name = part.get("tool") or part.get("toolName") or part.get("name") or ""
-            state = part.get("state") if isinstance(part.get("state"), dict) else {}
+            state_raw = part.get("state")
+            state: dict = state_raw if isinstance(state_raw, dict) else {}
             inp = state.get("input")
-            tool_use.append({"name": name, "input": _stringify(inp)})
-            if "output" in state and state["output"] is not None:
-                tool_result.append({"content": _stringify(state["output"])})
+            tool_use.append(
+                {"name": name, "input": _stringify(inp), "timestamp": ts_for_entry}
+            )
+            output = state.get("output")
+            if output is not None:
+                tool_result.append({"content": _stringify(output)})
         elif ptype in ("file", "patch"):
-            tool_use.append({"name": ptype, "input": _part_metadata_input(part)})
+            tool_use.append(
+                {"name": ptype, "input": _part_metadata_input(part), "timestamp": ts_for_entry}
+            )
         # step-start / step-finish / unknown → skip
 
     return Message(
@@ -488,6 +505,7 @@ def _build_message(
         text="\n".join(text_chunks),
         tool_use=tuple(tool_use),
         tool_result=tuple(tool_result),
+        timestamp=timestamp,
     )
 
 
@@ -530,18 +548,28 @@ def _extract_messages_from_db(db_path: str, uuid: str) -> List[Message]:
     # part-less message under LEFT JOIN).
     current_mid: Optional[str] = None
     current_data: Optional[dict] = None
-    current_parts: List[dict] = []
+    current_parts: List[_PartTuple] = []
+    current_mtime: Optional[int] = None
+    current_min_ptime: Optional[int] = None
 
     def flush() -> None:
         nonlocal current_mid, current_data, current_parts
+        nonlocal current_mtime, current_min_ptime
         if current_mid is None:
             return
-        msg = _build_message(current_data, current_parts)
+        ts: Optional[datetime] = None
+        if current_min_ptime is not None:
+            ts = _epoch_ms_to_datetime(current_min_ptime)
+        elif current_mtime is not None:
+            ts = _epoch_ms_to_datetime(current_mtime)
+        msg = _build_message(current_data, current_parts, timestamp=ts)
         if msg is not None:
             messages.append(msg)
         current_mid = None
         current_data = None
         current_parts = []
+        current_mtime = None
+        current_min_ptime = None
 
     for row in rows:
         mid = row["mid"]
@@ -550,10 +578,17 @@ def _extract_messages_from_db(db_path: str, uuid: str) -> List[Message]:
             current_mid = mid
             current_data = _json_or_none(row["mdata"])
             current_parts = []
+            current_mtime = row["mtime"]
+            current_min_ptime = None
         pdata_blob = row["pdata"] if "pdata" in row.keys() else None
         part = _json_or_none(pdata_blob)
+        ptime = row["ptime"] if "ptime" in row.keys() else None
+        if isinstance(ptime, int) and (
+            current_min_ptime is None or ptime < current_min_ptime
+        ):
+            current_min_ptime = ptime
         if part is not None:
-            current_parts.append(part)
+            current_parts.append((part, ptime if isinstance(ptime, int) else None))
     flush()
     return messages
 

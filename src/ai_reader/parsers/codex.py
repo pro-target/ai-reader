@@ -344,6 +344,7 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
 
                 if rec_type == "response_item":
                     ptype = payload.get("type")
+                    env_ts = _parse_iso_timestamp(record.get("timestamp", ""))
                     if ptype == "message":
                         role = payload.get("role")
                         if role not in ("user", "assistant"):
@@ -354,7 +355,7 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
                             if key in seen_user_texts:
                                 continue
                             seen_user_texts.add(key)
-                        messages.append(Message(role=role, text=text))
+                        messages.append(Message(role=role, text=text, timestamp=env_ts))
                     elif ptype in ("function_call", "local_shell_call"):
                         name = payload.get("name") or ptype
                         arguments = payload.get("arguments", "")
@@ -370,6 +371,7 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
                                 role="assistant",
                                 text="",
                                 tool_use=({"name": name, "input": input_str},),
+                                timestamp=env_ts,
                             )
                         )
                     elif ptype in ("function_call_output", "local_shell_call_output"):
@@ -384,6 +386,7 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
                                 role="tool",
                                 text="",
                                 tool_result=({"content": output},),
+                                timestamp=env_ts,
                             )
                         )
                 # verified against Codex CLI 2026-05 snapshot; recheck on schema change
@@ -397,7 +400,8 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
                     if key in seen_user_texts:
                         continue
                     seen_user_texts.add(key)
-                    messages.append(Message(role="user", text=msg))
+                    env_ts = _parse_iso_timestamp(record.get("timestamp", ""))
+                    messages.append(Message(role="user", text=msg, timestamp=env_ts))
     except OSError:
         return messages
     return messages

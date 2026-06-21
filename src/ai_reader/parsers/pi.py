@@ -270,7 +270,9 @@ def read_session(uuid: str, base_dir: Optional[str] = None) -> Session:
 
 
 
-def _pi_extract_message(message: dict) -> Optional[Message]:
+def _pi_extract_message(
+    message: dict, timestamp: Optional[datetime] = None
+) -> Optional[Message]:
     """Convert a Pi ``message`` payload into a :class:`Message`.
 
     Returns ``None`` for roles we do not surface (``toolResult`` records
@@ -311,6 +313,7 @@ def _pi_extract_message(message: dict) -> Optional[Message]:
             role=role,
             text="\n".join(text_chunks),
             tool_use=tuple(tool_use),
+            timestamp=timestamp,
         )
     if role == "toolResult":
         result_text = "\n".join(text_chunks)
@@ -318,6 +321,7 @@ def _pi_extract_message(message: dict) -> Optional[Message]:
             role="tool",
             text="",
             tool_result=({"content": result_text},),
+            timestamp=timestamp,
         )
     return None
 
@@ -349,7 +353,8 @@ def _extract_messages_from_jsonl(path: Path) -> List[Message]:
                 message = record.get("message") or {}
                 if not isinstance(message, dict):
                     continue
-                parsed = _pi_extract_message(message)
+                ts = _entry_timestamp(record)
+                parsed = _pi_extract_message(message, timestamp=ts)
                 if parsed is not None:
                     messages.append(parsed)
     except OSError:

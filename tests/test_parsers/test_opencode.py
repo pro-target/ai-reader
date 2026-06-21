@@ -259,6 +259,61 @@ def test_read_messages_preserves_tool_calls(fake_opencode_db_with_tools: Path) -
     assert assistant.tool_result[0]["content"] == "5 passed"
 
 
+def test_tool_use_entries_carry_per_part_timestamp(
+    fake_opencode_db_with_tools: Path,
+) -> None:
+    """Each ``tool_use`` entry exposes the originating part's timestamp.
+
+    The fixture seeds 4 tool-like parts (shell, write, file, patch) at
+    ``t0+3``/``t0+4``/``t0+5``/``t0+6`` respectively — the timestamp on
+    each entry must match its part, not the message-level ts.
+    """
+    msgs = opencode.read_messages(
+        "oc-tools-1", override=str(fake_opencode_db_with_tools)
+    )
+    assistant = msgs[1]
+    t0_ms = 1_716_000_200_000
+    expected = {
+        "shell": t0_ms + 3,
+        "write": t0_ms + 4,
+        "file": t0_ms + 5,
+        "patch": t0_ms + 6,
+    }
+    from datetime import datetime, timezone
+    for tool in assistant.tool_use:
+        assert "timestamp" in tool, tool
+        ts = tool["timestamp"]
+        assert isinstance(ts, datetime)
+        assert ts.tzinfo is not None
+        assert ts.utcoffset() == timezone.utc.utcoffset(ts)
+        assert ts == datetime.fromtimestamp(
+            expected[tool["name"]] / 1000.0, tz=timezone.utc
+        )
+
+
+def test_message_timestamp_is_earliest_part(
+    fake_opencode_db_with_tools: Path,
+) -> None:
+    """``Message.timestamp`` reflects the earliest part time, not the latest.
+
+    Without parts the message falls back to its own ``mtime``; with
+    parts, the first part's ``time_created`` wins so consumers can rely
+    on "first thing happened" semantics.
+    """
+    from datetime import datetime, timezone
+    msgs = opencode.read_messages(
+        "oc-tools-1", override=str(fake_opencode_db_with_tools)
+    )
+    assistant = msgs[1]
+    ts = assistant.timestamp
+    assert isinstance(ts, datetime)
+    assert ts.tzinfo is not None
+    # a1-p0 (step-start) is at t0+0; assistant mtime is at t0; earliest
+    # wins → t0.
+    t0_ms = 1_716_000_200_000
+    assert ts == datetime.fromtimestamp(t0_ms / 1000.0, tz=timezone.utc)
+
+
 def test_read_messages_missing_raises(fake_opencode_db: Path) -> None:
     with pytest.raises(FileNotFoundError):
         opencode.read_messages("nope", override=str(fake_opencode_db))

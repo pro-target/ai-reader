@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from ai_reader.mcp_server import (
     _pi_text,
     _session_summary,
     _target_agents,
+    find_file_edits,
     list_sessions,
     mcp,
     read_session,
@@ -1038,3 +1040,855 @@ def test_extract_snippet_centers_on_term() -> None:
     assert "dolor" in snippet or "adipiscing" in snippet
     # No match -> empty string.
     assert _extract_snippet("nothing here", ["nope"]) == ""
+
+
+# ---------------------------------------------------------------------------
+# find_file_edits
+# ---------------------------------------------------------------------------
+
+
+def _write_claude_edit_session(
+    tmp_sessions_dir: Path,
+    uuid: str,
+    *,
+    user_text: str,
+    edit_path: str,
+    old_string: str = "old",
+    new_string: str = "new",
+    ts_user: str = "2026-06-14T10:00:00Z",
+    ts_edit: str = "2026-06-14T10:00:05Z",
+) -> None:
+    """Write a Claude JSONL with one user message + one assistant Edit call."""
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": user_text},
+            "timestamp": ts_user,
+            "sessionId": uuid,
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Editing now."},
+                    {
+                        "type": "tool_use",
+                        "name": "Edit",
+                        "input": {
+                            "file_path": edit_path,
+                            "old_string": old_string,
+                            "new_string": new_string,
+                        },
+                    },
+                ],
+            },
+            "timestamp": ts_edit,
+            "sessionId": uuid,
+        },
+    ]
+    jsonl = tmp_sessions_dir / ".claude" / "projects" / "proj-fe" / f"{uuid}.jsonl"
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    jsonl.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_pi_edit_session(
+    tmp_sessions_dir: Path,
+    uuid: str,
+    *,
+    user_text: str,
+    edit_path: str,
+    user_ts_ms: int = 1_718_360_002_000,
+    edit_ts_ms: int = 1_718_360_004_000,
+) -> None:
+    """Write a Pi JSONL with a str_replace tool call (Pi-style Edit)."""
+    jsonl = (
+        tmp_sessions_dir
+        / ".pi"
+        / "agent"
+        / "sessions"
+        / "--tmp-fe--"
+        / f"2026-06-14T10-00-00-000Z_{uuid}.jsonl"
+    )
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "type": "session",
+            "id": uuid,
+            "timestamp": "2026-06-14T10:00:00.000Z",
+            "cwd": "/tmp/fe",
+        },
+        {
+            "type": "message",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": user_text}],
+                "timestamp": user_ts_ms,
+            },
+        },
+        {
+            "type": "message",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Replacing now."},
+                    {
+                        "type": "toolCall",
+                        "name": "str_replace",
+                        "arguments": {
+                            "path": edit_path,
+                            "old_string": "old",
+                            "new_string": "new",
+                        },
+                    },
+                ],
+                "timestamp": edit_ts_ms,
+            },
+        },
+    ]
+    jsonl.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_opencode_edit_db(
+    tmp_sessions_dir: Path,
+    uuid: str,
+    *,
+    user_text: str,
+    edit_path: str,
+    user_ms: int,
+    edit_ms: int,
+) -> Path:
+    """Write a minimal OpenCode DB with a ``patch``-type tool part."""
+    db_path = tmp_sessions_dir / "opencode_fe.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE session (
+            id           TEXT PRIMARY KEY,
+            parent_id    TEXT,
+            title        TEXT,
+            time_created INTEGER,
+            time_updated INTEGER
+        );
+        CREATE TABLE message (
+            id           TEXT PRIMARY KEY,
+            session_id   TEXT NOT NULL REFERENCES session(id),
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data         TEXT
+        );
+        CREATE TABLE part (
+            id           TEXT PRIMARY KEY,
+            message_id   TEXT NOT NULL REFERENCES message(id),
+            session_id   TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data         TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO session VALUES (?, NULL, ?, ?, ?)",
+        (uuid, "fe session", user_ms, edit_ms + 1000),
+    )
+    conn.executemany(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+        [
+            ("u1", uuid, user_ms, user_ms,
+             json.dumps({"role": "user"})),
+            ("a1", uuid, edit_ms, edit_ms,
+             json.dumps({"role": "assistant"})),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("u1-p0", "u1", uuid, user_ms, user_ms,
+             json.dumps({"type": "text", "text": user_text})),
+            ("a1-p0", "a1", uuid, edit_ms, edit_ms,
+             json.dumps({"type": "patch", "hash": "h1",
+                         "files": [{"path": edit_path, "added": 1, "removed": 1}]})),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_find_file_edits_registered() -> None:
+    names = _run(_tool_names())
+    assert "find_file_edits" in names
+
+
+def test_find_file_edits_empty_path_returns_error() -> None:
+    result = find_file_edits(path="")
+    assert result.get("error") == "invalid_argument"
+
+
+def test_find_file_edits_no_match_returns_empty(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No edit tool calls anywhere -> empty records, count=0, not truncated."""
+    _write_claude_edit_session(
+        tmp_sessions_dir, "no-match-1",
+        user_text="hi", edit_path="/tmp/nowhere.txt",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = find_file_edits(path="/definitely/not/a/real/path/zzz")
+    assert result == {"records": [], "count": 0, "truncated": False}
+
+
+def test_find_file_edits_claude_match(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cross-agent default: Claude Edit call surfaces with intent and ts."""
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-1",
+        user_text="Add the README header",
+        edit_path="/tmp/ai-reader/README.md",
+        ts_user="2026-06-14T10:00:00Z",
+        ts_edit="2026-06-14T10:00:05Z",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = find_file_edits(path="README.md")
+    assert result["count"] >= 1
+    assert result["truncated"] is False
+    hit = next(r for r in result["records"] if r["session_uuid"] == "cfe-1")
+    assert hit["agent"] == "claude"
+    assert hit["tool"] == "Edit"
+    assert hit["file"] == "/tmp/ai-reader/README.md"
+    assert hit["intent"] == "Add the README header"
+    assert hit["assistant"] == "Editing now."
+    assert hit["timestamp"] == "2026-06-14T10:00:05+00:00"
+    assert hit["input"]["old_string"] == "old"
+    assert hit["input"]["new_string"] == "new"
+
+
+def test_find_file_edits_agent_filter(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``agent`` filter narrows results to a single agent."""
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-2",
+        user_text="Edit README", edit_path="/tmp/agent-filter/README.md",
+    )
+    _write_pi_edit_session(
+        tmp_sessions_dir, "pfe-2",
+        user_text="Edit pi file", edit_path="/tmp/agent-filter/README.md",
+    )
+    base_claude = str(tmp_sessions_dir / ".claude" / "projects")
+    base_pi = str(tmp_sessions_dir / ".pi" / "agent" / "sessions")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base_claude)
+    )
+    monkeypatch.setattr(
+        "ai_reader.parsers.pi._resolve_base_dir", lambda bd=None: Path(base_pi)
+    )
+    claude_only = find_file_edits(path="agent-filter", agent="claude")
+    assert {r["agent"] for r in claude_only["records"]} == {"claude"}
+    pi_only = find_file_edits(path="agent-filter", agent="pi")
+    assert {r["agent"] for r in pi_only["records"]} == {"pi"}
+
+
+def test_find_file_edits_path_substring(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``path`` is a substring filter; only matching files surface."""
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-sub-a",
+        user_text="A", edit_path="/tmp/x/proj/README.md",
+    )
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-sub-b",
+        user_text="B", edit_path="/tmp/x/other/CHANGELOG.md",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = find_file_edits(path="README")
+    uuids = [r["session_uuid"] for r in result["records"]]
+    assert "cfe-sub-a" in uuids
+    assert "cfe-sub-b" not in uuids
+
+
+def test_find_file_edits_since_until_filter(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """since/until bound the edit timestamp inclusive."""
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-bound-a",
+        user_text="A", edit_path="/tmp/boundary/file.txt",
+        ts_user="2026-06-14T09:00:00Z", ts_edit="2026-06-14T09:00:05Z",
+    )
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-bound-b",
+        user_text="B", edit_path="/tmp/boundary/file.txt",
+        ts_user="2026-06-14T11:00:00Z", ts_edit="2026-06-14T11:00:05Z",
+    )
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-bound-c",
+        user_text="C", edit_path="/tmp/boundary/file.txt",
+        ts_user="2026-06-14T12:00:00Z", ts_edit="2026-06-14T12:00:05Z",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = find_file_edits(
+        path="boundary",
+        since="2026-06-14T10:00:00Z",
+        until="2026-06-14T11:30:00Z",
+    )
+    uuids = {r["session_uuid"] for r in result["records"]}
+    assert uuids == {"cfe-bound-b"}
+
+
+def test_find_file_edits_limit_caps_results(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``limit`` caps the result list and sets ``truncated``."""
+    for i in range(4):
+        _write_claude_edit_session(
+            tmp_sessions_dir, f"cfe-cap-{i}",
+            user_text=f"u{i}", edit_path=f"/tmp/cap/file-{i}.txt",
+            ts_user=f"2026-06-14T10:0{i}:00Z",
+            ts_edit=f"2026-06-14T10:0{i}:30Z",
+        )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = find_file_edits(path="cap/file-", limit=2)
+    assert len(result["records"]) == 2
+    assert result["count"] == 4
+    assert result["truncated"] is True
+    # Sorted by timestamp ASC: cap-0 first, then cap-1.
+    ts_list = [r["timestamp"] for r in result["records"]]
+    assert ts_list == sorted(ts_list)
+
+
+def test_find_file_edits_invalid_iso_bound(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bad ISO strings surface as ``invalid_argument``."""
+    result = find_file_edits(path="x", since="not-a-date")
+    assert result.get("error") == "invalid_argument"
+    assert "since" in result["message"].lower()
+
+
+def test_find_file_edits_invalid_agent(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = find_file_edits(path="x", agent="mystery")
+    assert result.get("error") == "invalid_argument"
+
+
+def test_find_file_edits_opencode_match(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OpenCode ``patch`` parts are recognised as file edits.
+
+    The synthetic session has a unique ``edit_path`` so the test stays
+    robust even if real snap DBs leak through the opencode parser's
+    multi-DB discovery.
+    """
+    unique_marker = "/tmp/oc-find-file-edits-zzz/models.py"
+    db_path = _write_opencode_edit_db(
+        tmp_sessions_dir, "oc-fe-1",
+        user_text="Patch the model",
+        edit_path=unique_marker,
+        user_ms=1_716_000_100_000,
+        edit_ms=1_716_000_200_000,
+    )
+    monkeypatch.setenv("OPENCODE_DB", str(db_path))
+    result = find_file_edits(
+        path="find-file-edits-zzz", agent="opencode"
+    )
+    assert result["count"] == 1
+    hit = result["records"][0]
+    assert hit["agent"] == "opencode"
+    assert hit["tool"] == "patch"
+    assert hit["file"] == unique_marker
+    assert hit["intent"] == "Patch the model"
+    # ts must be the part's time, which is tz-aware.
+    assert hit["timestamp"] is not None
+    assert hit["timestamp"].endswith("+00:00")
+
+
+def test_find_file_edits_intent_from_immediately_previous_user(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``intent`` is the immediately-previous user message text."""
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-intent",
+        user_text="Refactor the auth module",
+        edit_path="/tmp/intent/auth.py",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = find_file_edits(path="intent/auth.py")
+    assert result["count"] == 1
+    assert result["records"][0]["intent"] == "Refactor the auth module"
+
+
+def test_find_file_edits_cross_agent_default(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default (no agent filter) returns hits from multiple agents."""
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-cross",
+        user_text="Edit README in claude",
+        edit_path="/tmp/cross/shared.md",
+        ts_user="2026-06-14T10:00:00Z",
+        ts_edit="2026-06-14T10:00:05Z",
+    )
+    _write_pi_edit_session(
+        tmp_sessions_dir, "pfe-cross",
+        user_text="Edit README in pi",
+        edit_path="/tmp/cross/shared.md",
+        user_ts_ms=1_718_360_002_000,
+        edit_ts_ms=1_718_360_004_000,
+    )
+    base_claude = str(tmp_sessions_dir / ".claude" / "projects")
+    base_pi = str(tmp_sessions_dir / ".pi" / "agent" / "sessions")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base_claude)
+    )
+    monkeypatch.setattr(
+        "ai_reader.parsers.pi._resolve_base_dir", lambda bd=None: Path(base_pi)
+    )
+    result = find_file_edits(path="cross/shared")
+    agents = {r["agent"] for r in result["records"]}
+    assert {"claude", "pi"} <= agents
+
+
+def test_find_file_edits_via_mcp_client(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tool is reachable through the real MCP client surface."""
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-mcp",
+        user_text="MCP path",
+        edit_path="/tmp/mcp-via/path.py",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    texts = _run(_call("find_file_edits", {"path": "mcp-via"}))
+    payload = json.loads(texts[0])
+    assert payload["count"] >= 1
+    assert any(r["session_uuid"] == "cfe-mcp" for r in payload["records"])
+
+
+# ---------------------------------------------------------------------------
+# find_file_edits — codex function_call names
+# ---------------------------------------------------------------------------
+
+
+def _write_codex_edit_session(
+    tmp_sessions_dir: Path,
+    uuid: str,
+    *,
+    user_text: str,
+    tool_name: str,
+    arguments: dict,
+    ts_user: str = "2026-06-14T10:00:00Z",
+    ts_call: str = "2026-06-14T10:00:05Z",
+) -> None:
+    """Write a Codex rollout with a single function_call edit tool."""
+    rollout = (
+        tmp_sessions_dir
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "06"
+        / "14"
+        / f"rollout-2026-06-14T10-00-00-{uuid}.jsonl"
+    )
+    rollout.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "timestamp": "2026-06-14T10:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": uuid, "cwd": "/tmp/fe"},
+        },
+        {
+            "timestamp": ts_user,
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "text", "text": user_text}],
+            },
+        },
+        {
+            "timestamp": ts_call,
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": tool_name,
+                "arguments": json.dumps(arguments),
+            },
+        },
+    ]
+    rollout.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_find_file_edits_codex_write_file(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex ``write_file`` function_call surfaces as an edit hit."""
+    _write_codex_edit_session(
+        tmp_sessions_dir, "cxf-1",
+        user_text="Create the new module",
+        tool_name="write_file",
+        arguments={"file_path": "/tmp/codex-write/models.py", "content": "x = 1\n"},
+    )
+    base = str(tmp_sessions_dir / ".codex" / "sessions")
+    monkeypatch.setattr(
+        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
+    )
+    result = find_file_edits(path="codex-write", agent="codex")
+    assert result["count"] == 1
+    hit = result["records"][0]
+    assert hit["agent"] == "codex"
+    assert hit["tool"] == "write_file"
+    assert hit["file"] == "/tmp/codex-write/models.py"
+    assert hit["intent"] == "Create the new module"
+
+
+def test_find_file_edits_codex_apply_patch(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex ``apply_patch`` function_call surfaces as an edit hit."""
+    _write_codex_edit_session(
+        tmp_sessions_dir, "cxf-2",
+        user_text="Apply the README patch",
+        tool_name="apply_patch",
+        arguments={"file_path": "/tmp/codex-patch/README.md", "patch": "..."},
+    )
+    base = str(tmp_sessions_dir / ".codex" / "sessions")
+    monkeypatch.setattr(
+        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
+    )
+    result = find_file_edits(path="codex-patch", agent="codex")
+    assert result["count"] == 1
+    hit = result["records"][0]
+    assert hit["agent"] == "codex"
+    assert hit["tool"] == "apply_patch"
+    assert hit["file"] == "/tmp/codex-patch/README.md"
+
+
+def test_find_file_edits_codex_unknown_tool_skipped(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-edit codex function_call name produces no records."""
+    _write_codex_edit_session(
+        tmp_sessions_dir, "cxf-3",
+        user_text="Run a command",
+        tool_name="shell",
+        arguments={"command": "ls"},
+    )
+    base = str(tmp_sessions_dir / ".codex" / "sessions")
+    monkeypatch.setattr(
+        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
+    )
+    result = find_file_edits(path="cxf-3", agent="codex")
+    assert result["count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# find_file_edits — antigravity tool_use
+# ---------------------------------------------------------------------------
+
+
+def _write_antigravity_edit_brain(
+    tmp_sessions_dir: Path,
+    uuid: str,
+    *,
+    user_text: str,
+    tool_name: str,
+    arguments: dict,
+    ts_user: str = "2026-06-14T10:00:00Z",
+    ts_call: str = "2026-06-14T10:00:05Z",
+) -> None:
+    """Write a brain with a user prompt and a MODEL_TOOL_CALL edit."""
+    brain = tmp_sessions_dir / ".gemini" / "antigravity" / "brain" / uuid
+    (brain / ".system_generated" / "logs").mkdir(parents=True)
+    transcript = brain / ".system_generated" / "logs" / "transcript_full.jsonl"
+    records = [
+        {
+            "timestamp": ts_user,
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "content": user_text,
+        },
+        {
+            "timestamp": ts_call,
+            "source": "MODEL",
+            "type": "MODEL_TOOL_CALL",
+            "name": tool_name,
+            "args": arguments,
+        },
+    ]
+    transcript.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_find_file_edits_antigravity_model_tool_call(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Antigravity ``MODEL_TOOL_CALL`` records surface as edit hits."""
+    _write_antigravity_edit_brain(
+        tmp_sessions_dir, "ag-fe-1",
+        user_text="Patch the auth module",
+        tool_name="Edit",
+        arguments={
+            "file_path": "/tmp/ag-edit/auth.py",
+            "old_text": "old",
+            "new_text": "new",
+        },
+    )
+    result = find_file_edits(path="ag-edit", agent="antigravity")
+    assert result["count"] == 1
+    hit = result["records"][0]
+    assert hit["agent"] == "antigravity"
+    assert hit["tool"] == "Edit"
+    assert hit["file"] == "/tmp/ag-edit/auth.py"
+    assert hit["intent"] == "Patch the auth module"
+
+
+def test_find_file_edits_antigravity_content_part_tool(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Antigravity tool call embedded in a content parts list surfaces."""
+    brain = (
+        tmp_sessions_dir / ".gemini" / "antigravity" / "brain" / "ag-fe-2"
+    )
+    (brain / ".system_generated" / "logs").mkdir(parents=True)
+    transcript = brain / ".system_generated" / "logs" / "transcript_full.jsonl"
+    records = [
+        {
+            "timestamp": "2026-06-14T10:00:00Z",
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "content": "Refactor",
+        },
+        {
+            "timestamp": "2026-06-14T10:00:05Z",
+            "source": "MODEL",
+            "type": "MODEL_OUTPUT",
+            "content": [
+                {"type": "text", "text": "Editing now."},
+                {
+                    "type": "MODEL_TOOL_CALL",
+                    "name": "Edit",
+                    "args": {
+                        "file_path": "/tmp/ag-content/handler.py",
+                        "old_text": "a",
+                        "new_text": "b",
+                    },
+                },
+            ],
+        },
+    ]
+    transcript.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+    result = find_file_edits(path="ag-content", agent="antigravity")
+    assert result["count"] == 1
+    hit = result["records"][0]
+    assert hit["agent"] == "antigravity"
+    assert hit["tool"] == "Edit"
+    assert hit["file"] == "/tmp/ag-content/handler.py"
+
+
+# ---------------------------------------------------------------------------
+# find_file_edits — bound filter naive vs aware normalization
+# ---------------------------------------------------------------------------
+
+
+def test_find_file_edits_naive_ts_vs_aware_bound_no_crash(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Parser emits a naive ``msg.timestamp`` while user passes a tz-aware
+    ``since`` bound; the consumer must normalise both to UTC-aware before
+    comparison — no ``TypeError``, the in-window edit must surface, the
+    out-of-window edit must be skipped.
+    """
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-naive-1",
+        user_text="in window",
+        edit_path="/tmp/naive/in.py",
+        ts_user="2026-06-14T09:00:00Z",
+        ts_edit="2026-06-14T11:00:00Z",
+    )
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-naive-2",
+        user_text="out of window",
+        edit_path="/tmp/naive/out.py",
+        ts_user="2026-06-14T09:00:00Z",
+        ts_edit="2026-06-14T08:00:00Z",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    # Force the claude parser to produce a NAIVE datetime for both
+    # sessions (the bug scenario: ISO without Z → no tzinfo).
+    import ai_reader.parsers.claude as claude_parser
+    real_parse = claude_parser._parse_iso_timestamp
+
+    def _naive_parse(raw):
+        dt = real_parse(raw)
+        if dt is not None:
+            return dt.replace(tzinfo=None)
+        return None
+
+    monkeypatch.setattr(claude_parser, "_parse_iso_timestamp", _naive_parse)
+    # User bound is tz-aware — this is where the TypeError used to fire.
+    result = find_file_edits(
+        path="naive",
+        since="2026-06-14T10:00:00+00:00",
+    )
+    uuids = {r["session_uuid"] for r in result["records"]}
+    assert "cfe-naive-1" in uuids
+    assert "cfe-naive-2" not in uuids
+
+
+def test_find_file_edits_aware_bound_with_aware_record(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sanity: tz-aware record + tz-aware bound still work end-to-end."""
+    _write_claude_edit_session(
+        tmp_sessions_dir, "cfe-aware-1",
+        user_text="A", edit_path="/tmp/aware/file.txt",
+        ts_edit="2026-06-14T10:00:05Z",
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = find_file_edits(
+        path="aware",
+        since="2026-06-14T10:00:00+00:00",
+        until="2026-06-14T11:00:00+00:00",
+    )
+    uuids = {r["session_uuid"] for r in result["records"]}
+    assert uuids == {"cfe-aware-1"}
+
+
+# ---------------------------------------------------------------------------
+# find_file_edits — opencode per-tool_use timestamp
+# ---------------------------------------------------------------------------
+
+
+def test_find_file_edits_opencode_per_tool_timestamp(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OpenCode: tool_use entries carry their own part timestamp; the
+    consumer prefers it over the message-level ts.
+
+    Two ``patch`` parts in the same message at different times. The
+    message-level ts is the earliest part (per parser spec) — which
+    falls *before* the since-bound, so under the old per-message
+    timestamp the whole message would be skipped. The per-tool
+    timestamp surfaces the second patch only.
+    """
+    db_path = tmp_sessions_dir / "opencode_pertool.db"
+    import sqlite3 as _sql
+    conn = _sql.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE session (
+            id           TEXT PRIMARY KEY,
+            parent_id    TEXT,
+            title        TEXT,
+            time_created INTEGER,
+            time_updated INTEGER
+        );
+        CREATE TABLE message (
+            id           TEXT PRIMARY KEY,
+            session_id   TEXT NOT NULL REFERENCES session(id),
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data         TEXT
+        );
+        CREATE TABLE part (
+            id           TEXT PRIMARY KEY,
+            message_id   TEXT NOT NULL REFERENCES message(id),
+            session_id   TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data         TEXT NOT NULL
+        );
+        """
+    )
+    uuid = "oc-perttool-1"
+    # 2025-06-14 10:00:00Z = 1749895200 sec = 1_749_895_200_000 ms
+    since_ms = 1_749_895_200_000
+    p1_ms = since_ms - 600_000      # 09:50:00Z (before bound)
+    p2_ms = since_ms + 600_000      # 10:10:00Z (after bound)
+    user_ms = p1_ms - 60_000
+    conn.execute(
+        "INSERT INTO session VALUES (?, NULL, ?, ?, ?)",
+        (uuid, "per-tool ts", user_ms, p2_ms + 1000),
+    )
+    conn.executemany(
+        "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+        [
+            ("u1", uuid, user_ms, user_ms, json.dumps({"role": "user"})),
+            ("a1", uuid, p2_ms, p2_ms, json.dumps({"role": "assistant"})),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("u1-p0", "u1", uuid, user_ms, user_ms,
+             json.dumps({"type": "text", "text": "patch two files"})),
+            ("a1-p0", "a1", uuid, p1_ms, p1_ms,
+             json.dumps({"type": "patch", "hash": "h1",
+                         "files": [{"path": "/tmp/pertool/first.py",
+                                    "added": 1, "removed": 0}]})),
+            ("a1-p1", "a1", uuid, p2_ms, p2_ms,
+             json.dumps({"type": "patch", "hash": "h2",
+                         "files": [{"path": "/tmp/pertool/second.py",
+                                    "added": 1, "removed": 0}]})),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("OPENCODE_DB", str(db_path))
+    result = find_file_edits(
+        path="pertool",
+        since="2025-06-14T10:00:00+00:00",  # between p1_ms and p2_ms
+        agent="opencode",
+    )
+    assert result["count"] == 1
+    hit = result["records"][0]
+    assert hit["file"] == "/tmp/pertool/second.py"
+    # ts must be the second part's tz-aware time.
+    assert hit["timestamp"] is not None
+    assert hit["timestamp"].endswith("+00:00")
