@@ -174,3 +174,110 @@ def test_cli_export_rounds_stdout(tmp_sessions_dir: Path) -> None:
     assert uuid in out
     assert "[non-actionable]" in out
     assert "## Round:" not in out
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage (audit 2026-06-21): _render_round status, _extract_file_paths
+# edge cases, _snapshot_line cost branch, and the untested ``--output`` flag.
+# ---------------------------------------------------------------------------
+
+
+def test_rounds_render_completed_status() -> None:
+    """A session whose last message is ``assistant`` renders Status=completed."""
+    session = _make_session()
+    messages: list[Message] = [
+        Message(role="user", text="do the thing", tool_use=(), tool_result=()),
+        Message(role="assistant", text="did it", tool_use=(), tool_result=()),
+    ]
+    out = session_to_rounds(session, messages=messages)
+    assert "### Status" in out
+    assert "completed" in out
+
+
+def test_rounds_extract_file_paths_invalid_json_skipped() -> None:
+    """A tool_use whose ``input`` is unparseable JSON is skipped, not fatal."""
+    session = _make_session()
+    messages: list[Message] = [
+        Message(role="user", text="go", tool_use=(), tool_result=()),
+        Message(
+            role="assistant",
+            text="editing",
+            tool_use=({"name": "Edit", "input": "{not json"},),
+            tool_result=(),
+        ),
+    ]
+    out = session_to_rounds(session, messages=messages)
+    assert "### Files touched" in out
+    assert "(none)" in out
+
+
+def test_rounds_extract_file_paths_notebook_path() -> None:
+    """``notebook_path`` (a _PATH_KEYS entry) is extracted for NotebookEdit."""
+    session = _make_session()
+    messages: list[Message] = [
+        Message(role="user", text="go", tool_use=(), tool_result=()),
+        Message(
+            role="assistant",
+            text="editing",
+            tool_use=(
+                {
+                    "name": "NotebookEdit",
+                    "input": json.dumps({"notebook_path": "nb/analysis.ipynb"}),
+                },
+            ),
+            tool_result=(),
+        ),
+    ]
+    out = session_to_rounds(session, messages=messages)
+    assert "`nb/analysis.ipynb`" in out
+
+
+def test_rounds_snapshot_cost_branch() -> None:
+    """``_snapshot_line`` reports cost when present, ``n/a`` otherwise."""
+    msgs: list[Message] = [
+        Message(role="user", text="go", tool_use=(), tool_result=()),
+    ]
+    out_cost = session_to_rounds(_make_session(extra={"cost": 0.05}), messages=msgs)
+    assert "### Snapshot" in out_cost
+    assert "cost: 0.05" in out_cost
+
+    out_na = session_to_rounds(_make_session(extra={}), messages=msgs)
+    assert "### Snapshot\nn/a" in out_na
+
+
+def test_cli_export_rounds_output_writes_file(
+    tmp_sessions_dir: Path, tmp_path: Path
+) -> None:
+    """``export rounds UUID --output OUT`` writes the markdown to OUT."""
+    uuid = "test-export-out"
+    path = (
+        tmp_sessions_dir
+        / ".claude"
+        / "projects"
+        / "proj-a"
+        / f"{uuid}.jsonl"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "First message"},
+                "timestamp": "2026-06-14T10:00:00Z",
+                "sessionId": uuid,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out_file = tmp_path / "rounds.md"
+    rc, _stdout, stderr = _run_inproc(
+        ["export", "rounds", uuid, "--output", str(out_file)],
+        env={"AI_READER_HOME": str(tmp_sessions_dir)},
+    )
+    assert rc == 0, stderr
+    assert out_file.exists()
+    content = out_file.read_text(encoding="utf-8")
+    assert "# Session:" in content
+    assert uuid in content

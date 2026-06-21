@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import inspect
 import io
 import os
 from pathlib import Path
@@ -412,3 +413,193 @@ def test_cli_detect_session_warns_on_multiple(
     assert rc == 0
     assert "WARN" in err
     assert "disambiguation" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Regression lock + identity-resolution gaps (audit 2026-06-21)
+#
+# The authorization gate (src/ai_reader/access/, guard.py) was removed
+# intentionally — a public single-user tool reads its owner's own sessions.
+# These tests lock that decision and cover previously-untested branches of
+# the session identity cascade (AI_SESSION_OUTPUT modes, sidecar parsing,
+# env-vs-flag shadowing, fingerprint prefix collision).
+# ---------------------------------------------------------------------------
+
+
+def test_no_authorization_gate_parent_reads_sessions(
+    _clean_env: None, identity_dir: Path
+) -> None:
+    """Regression lock: no authorization gate; parent reads own sessions.
+
+    Asserts (1) the deleted ``ai_reader.access`` module stays gone, (2) a
+    process with no sub-agent env markers reads its session without
+    ``PermissionError``, and (3) no symbol in ``ai_reader.session``
+    enforces sub-agent authorization.  Locks the approved public-repo
+    decision from commit ee72961.
+    """
+    import importlib
+
+    # (1) The access module is deleted — do not silently reintroduce it.
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("ai_reader.access")
+
+    # (2) Parent (no subagent markers) reads its own session: no gate.
+    sid = "abcdef01-2345-6789-abcd-ef0123456789"
+    _write_per_session(identity_dir, "claude", sid)
+    resolved = detect_session_id_with_source()
+    assert resolved[0] == sid
+    assert resolved[1].startswith("ts_file:")
+    assert resolved[2] is AgentName.CLAUDE
+
+    # (3) Static lock: session.py carries no authorization primitive.
+    import ai_reader.session as session_mod
+
+    source = inspect.getsource(session_mod)
+    assert "PermissionError" not in source
+    assert "is_subagent" not in source
+
+
+def test_detect_session_id_first_mode_no_warning(
+    _clean_env: None, identity_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``AI_SESSION_OUTPUT=first`` returns the first candidate, no WARN."""
+    monkeypatch.setenv("AI_SESSION_OUTPUT", "first")
+    monkeypatch.setenv("AI_SESSION_ID", "ses_first_mode_xx")
+    _write_per_session(
+        identity_dir, "claude", "abcdef01-2345-6789-abcd-ef0123456789"
+    )
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        sid = detect_session_id()
+    assert sid == "ses_first_mode_xx"
+    assert err.getvalue() == ""
+
+
+def test_detect_session_id_unknown_mode_falls_back_to_list(
+    _clean_env: None, identity_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unknown ``AI_SESSION_OUTPUT`` warns and falls back to list mode."""
+    monkeypatch.setenv("AI_SESSION_OUTPUT", "bogus")
+    monkeypatch.setenv("AI_SESSION_ID", "ses_unknown_mode")
+    _write_per_session(
+        identity_dir, "claude", "abcdef01-2345-6789-abcd-ef0123456789"
+    )
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        sid = detect_session_id()
+    assert sid == "ses_unknown_mode"
+    stderr = err.getvalue()
+    assert "unknown AI_SESSION_OUTPUT" in stderr
+    assert "WARN" in stderr
+
+
+def test_detect_session_id_empty_output_var_defaults_to_list(
+    _clean_env: None, identity_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Empty ``AI_SESSION_OUTPUT`` does not crash; defaults to list mode."""
+    monkeypatch.setenv("AI_SESSION_OUTPUT", "")
+    monkeypatch.setenv("AI_SESSION_ID", "ses_empty_out")
+    _write_per_session(
+        identity_dir, "claude", "abcdef01-2345-6789-abcd-ef0123456789"
+    )
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        sid = detect_session_id()
+    assert sid == "ses_empty_out"
+    assert "disambiguation" in err.getvalue().lower()
+
+
+def test_detect_session_candidates_env_shadows_flag_file(
+    _clean_env: None, identity_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Env-var and flag-file candidates for the same id both survive; the
+    env candidate is emitted first, so callers taking ``[0]`` get the
+    env-var provenance (env shadows via ordering, not cross-list dedup)."""
+    uuid = "abcdef01-2345-6789-abcd-ef0123456789"
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", uuid)
+    _write_per_session(identity_dir, "claude", uuid)
+    resolved = detect_session_id_with_source()
+    assert resolved == (uuid, "CLAUDE_CODE_SESSION_ID", AgentName.CLAUDE)
+    sources = [
+        c.source for c in detect_session_candidates() if c.session_id == uuid
+    ]
+    assert "CLAUDE_CODE_SESSION_ID" in sources
+    assert "ts_file:claude" in sources
+
+
+def test_read_self_malformed_returns_none(tmp_path: Path) -> None:
+    """``.self`` with too few fields / non-integer PID yields None."""
+    from ai_reader.session import _read_self
+
+    flag_dir = tmp_path / "opencode"
+    flag_dir.mkdir(parents=True, exist_ok=True)
+    sid = "ses_selfbadxxxx"
+    too_few = flag_dir / f"{sid}.self"
+    too_few.write_text("opencode\tses_selfbadxxxx\tname\n", encoding="utf-8")
+    assert _read_self(flag_dir, sid) is None
+    bad_pid = flag_dir / f"{sid}.self"
+    bad_pid.write_text(
+        "opencode\tses_selfbadxxxx\tname\tnotapid\t10\n", encoding="utf-8"
+    )
+    assert _read_self(flag_dir, sid) is None
+
+
+def test_read_self_symlink_rejected(tmp_path: Path) -> None:
+    """A symlinked ``.self`` sidecar is rejected (symmetry with ``current``)."""
+    from ai_reader.session import _read_self
+
+    flag_dir = tmp_path / "opencode"
+    flag_dir.mkdir(parents=True, exist_ok=True)
+    sid = "ses_selflnkxxxxx"
+    real = flag_dir / "real"
+    real.write_text("opencode\tsid\tname\t100\t10\n", encoding="utf-8")
+    (flag_dir / f"{sid}.self").symlink_to(real)
+    assert _read_self(flag_dir, sid) is None
+
+
+def test_read_fingerprint_malformed_and_symlink(tmp_path: Path) -> None:
+    """``.fingerprint`` with too few fields / empty hash / symlink → None."""
+    from ai_reader.session import _read_fingerprint
+
+    flag_dir = tmp_path / "opencode"
+    flag_dir.mkdir(parents=True, exist_ok=True)
+    sid = "ses_fpbadxxxxxx"
+    fp = flag_dir / f"{sid}.fingerprint"
+
+    fp.write_text("opencode\tses_fpbadxxxxxx\n", encoding="utf-8")
+    assert _read_fingerprint(flag_dir, sid) is None
+
+    fp.write_text(
+        "opencode\tses_fpbadxxxxxx\t\t2026-06-21T00:00:00Z\n", encoding="utf-8"
+    )
+    assert _read_fingerprint(flag_dir, sid) is None
+
+    fp.unlink()
+    real = flag_dir / "real"
+    real.write_text(
+        "opencode\tses_fpbadxxxxxx\tdeadbeef\t2026-06-21T00:00:00Z\n",
+        encoding="utf-8",
+    )
+    fp.symlink_to(real)
+    assert _read_fingerprint(flag_dir, sid) is None
+
+
+def test_fingerprint_prefix_collision_documents_behaviour(
+    _clean_env: None, identity_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two sessions sharing the ``sha256[:8]`` prefix both match; mode
+    ``fingerprint:<prefix>`` returns the first.  Documents collision
+    behaviour (8-char prefix = 32 bits) as a lock-in until the prefix
+    is widened."""
+    prefix = "deadbeef"
+    sid_a = "ses_collide01aa"
+    sid_b = "ses_collide02bb"
+    _write_per_session(identity_dir, "opencode", sid_a)
+    _write_per_session(identity_dir, "opencode", sid_b)
+    _write_fingerprint(identity_dir, "opencode", sid_a, prefix + "0" * 56)
+    _write_fingerprint(identity_dir, "opencode", sid_b, prefix + "1" * 56)
+    candidates = detect_session_candidates()
+    matched = {c.session_id for c in candidates if c.fingerprint == prefix}
+    assert matched == {sid_a, sid_b}
+    monkeypatch.setenv("AI_SESSION_OUTPUT", f"fingerprint:{prefix}")
+    assert detect_session_id() in {sid_a, sid_b}

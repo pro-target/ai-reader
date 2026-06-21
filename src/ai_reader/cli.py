@@ -90,14 +90,6 @@ def _parse_date(value: str, field: str) -> datetime:
         raise ValueError(f"invalid {field} {value!r}: expected YYYY-MM-DD") from exc
 
 
-def _parse_date(value: str, field: str) -> datetime:
-    """Parse a YYYY-MM-DD string to a naive datetime at 00:00."""
-    try:
-        return datetime.strptime(value, "%Y-%m-%d")
-    except ValueError as exc:
-        raise ValueError(f"invalid {field} {value!r}: expected YYYY-MM-DD") from exc
-
-
 def _validate_date_args(args: argparse.Namespace) -> None:
     """Eagerly validate ``--from-date``/``--to-date`` strings.
 

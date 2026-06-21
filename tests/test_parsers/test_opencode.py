@@ -322,3 +322,42 @@ def test_read_messages_missing_raises(fake_opencode_db: Path) -> None:
 def test_read_messages_invalid_uuid(fake_opencode_db: Path) -> None:
     with pytest.raises(ValueError):
         opencode.read_messages("../escape", override=str(fake_opencode_db))
+
+
+def test_open_db_locked_falls_back_to_copy(
+    fake_opencode_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A persistently-locked DB is copied to /tmp and opened from there.
+
+    Exercises opencode.py:162-168 (``shutil.copy2`` fallback). Deterministic:
+    the read-only ``sqlite3.connect`` is forced to raise 'database is
+    locked' on every retry, so the copy branch runs without relying on
+    real cross-process lock contention. (Audit 2026-06-21 gap.)
+    """
+    import glob
+    import sqlite3 as _sqlite3
+
+    from ai_reader.parsers import opencode as oc
+
+    real_connect = _sqlite3.connect
+
+    def fake_connect(target, *args, **kwargs):
+        if isinstance(target, str) and "mode=ro" in target:
+            raise _sqlite3.OperationalError("database is locked")
+        return real_connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(oc.sqlite3, "connect", fake_connect)
+    monkeypatch.setattr(oc.time, "sleep", lambda *_a, **_k: None)
+
+    conn = oc._open_db(str(fake_opencode_db))
+    assert conn is not None
+    try:
+        # The fallback connection reads the copied schema.
+        count = conn.execute("SELECT count(*) FROM session").fetchone()[0]
+        assert count >= 0
+    finally:
+        conn.close()
+
+    assert glob.glob("/tmp/ai_reader_opencode_*.db"), (
+        "expected a fallback copy under /tmp"
+    )

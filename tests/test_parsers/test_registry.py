@@ -124,3 +124,46 @@ def test_find_sessions_agent_filter(tmp_sessions_dir: Path) -> None:
     assert results[0]["agent"] == "CLAUDE"
     assert results[0]["title"] == "refactor module"
     assert find_sessions("refactor", agent="codex") == []
+
+
+def test_read_session_multi_candidate_across_agents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same uuid claimed by two agents returns the candidate list.
+
+    Covers the ``len(exact) > 1`` branch of ``parsers.read_session``
+    (``__init__.py:160-161``) that the same-agent ambiguity test does not
+    reach.
+    """
+    from datetime import datetime
+
+    from ai_reader.parsers import claude as claude_mod
+    from ai_reader.parsers import codex as codex_mod
+
+    shared = "ses-shared-uuid"
+    fake_claude = Session(
+        uuid=shared,
+        agent=AgentName.CLAUDE,
+        title="claude one",
+        date=datetime(2026, 6, 14, 10, 0, 0),
+        path="/tmp/claude.jsonl",
+        message_count=0,
+        extra={},
+    )
+    fake_codex = Session(
+        uuid=shared,
+        agent=AgentName.CODEX,
+        title="codex one",
+        date=datetime(2026, 6, 14, 10, 0, 0),
+        path="/tmp/codex.jsonl",
+        message_count=0,
+        extra={},
+    )
+    monkeypatch.setattr(claude_mod, "read_session", lambda query, base_dir=None: fake_claude)
+    monkeypatch.setattr(codex_mod, "read_session", lambda query, base_dir=None: fake_codex)
+
+    result = read_session(shared)
+    assert isinstance(result, list)
+    assert len(result) == 2
+    agents = {cand["agent"] for cand in result}
+    assert agents == {"CLAUDE", "CODEX"}

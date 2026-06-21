@@ -211,6 +211,34 @@ def test_extract_event_msg_user_message(codex_event_msg_jsonl: Path) -> None:
     assert sum(1 for m in msgs if m.role == "assistant") == 1
 
 
+def test_extract_event_msg_short_message_filtered(tmp_path: Path) -> None:
+    """The ``len(msg) <= 10`` gate drops short-but-valid prompts (codex.py:395).
+
+    Documents current behaviour: a 3-char ``event_msg`` user_message is
+    discarded while an 11+ char one survives. (Audit 2026-06-21 gap.)
+    """
+    rollout = tmp_path / "rollout-short.jsonl"
+    records = [
+        {
+            "timestamp": "2026-06-14T10:00:00Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "yes"},
+        },
+        {
+            "timestamp": "2026-06-14T10:00:01Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "yes please continue"},
+        },
+    ]
+    rollout.write_text(
+        "".join(json.dumps(rec) + "\n" for rec in records), encoding="utf-8"
+    )
+    msgs = codex._extract_messages_from_rollout(rollout)
+    texts = [m.text for m in msgs if m.role == "user"]
+    assert "yes" not in texts
+    assert "yes please continue" in texts
+
+
 def test_discover_archived_sessions(tmp_sessions_dir: Path) -> None:
     active_uuid = "active-uuid-1"
     archived_uuid = "archived-uuid-1"
