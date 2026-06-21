@@ -6,6 +6,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **claude**: `extract_title()` now uses the **first** user message instead
+  of the last. Affects downstream summaries or UI that quoted the wrap-up
+  turn. If you depended on the old behavior, filter `Session.title` against
+  the original last user message via `read_session(...).messages[-1].content`
+  until a migration shim is shipped.
+
+### Security
+
+- **codex**: `AI_READER_DEDUP_KEY_LEN` is now re-read from the environment on
+  every dedup-key call. Previously the value was captured at import time, so
+  any runtime change to the environment (operator re-export, test using
+  `monkeypatch.setenv` after import, long-running service restart) was
+  silently ignored. New `parsers.codex.get_dedup_key_len()` accessor exposes
+  the resolved value for callers that want to introspect it.
+
 ## [0.1.0] - 2026-06-14
 
 First public alpha release.

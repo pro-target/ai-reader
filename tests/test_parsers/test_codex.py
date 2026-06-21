@@ -201,3 +201,33 @@ def test_read_messages_missing_raises(tmp_sessions_dir: Path) -> None:
 def test_read_messages_invalid_uuid(tmp_sessions_dir: Path) -> None:
     with pytest.raises(ValueError):
         codex.read_messages("../escape", base_dir=str(tmp_sessions_dir / ".codex" / "sessions"))
+
+
+def test_dedup_key_len_default_is_256() -> None:
+    assert codex.get_dedup_key_len() == 256
+
+
+def test_dedup_key_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Runtime env changes are honored — no module reload required."""
+    monkeypatch.setenv("AI_READER_DEDUP_KEY_LEN", "1024")
+    try:
+        assert codex.get_dedup_key_len() == 1024
+    finally:
+        monkeypatch.delenv("AI_READER_DEDUP_KEY_LEN", raising=False)
+    assert codex.get_dedup_key_len() == 256
+
+
+def test_dedup_key_invalid_env_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AI_READER_DEDUP_KEY_LEN", "not-a-number")
+    try:
+        assert codex.get_dedup_key_len() == 256
+    finally:
+        monkeypatch.delenv("AI_READER_DEDUP_KEY_LEN", raising=False)
+
+
+def test_dedup_key_non_positive_env_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AI_READER_DEDUP_KEY_LEN", "0")
+    try:
+        assert codex.get_dedup_key_len() == 256
+    finally:
+        monkeypatch.delenv("AI_READER_DEDUP_KEY_LEN", raising=False)

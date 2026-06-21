@@ -34,6 +34,26 @@ from .models import AgentName, Message, Session
 
 
 _TITLE_MAX_LEN = 100
+_DEDUP_KEY_LEN_DEFAULT = 256
+
+
+def get_dedup_key_len() -> int:
+    """Re-read ``$AI_READER_DEDUP_KEY_LEN`` on every call.
+
+    Cheap (single ``os.environ`` dict lookup); the alternative — module-level
+    capture at import time — silently ignores runtime changes (e.g. operator
+    restarts a long-running service after exporting a new value, or a test
+    that mutates the env post-import). Returns the default if unset, empty,
+    non-integer, or non-positive.
+    """
+    raw = os.environ.get("AI_READER_DEDUP_KEY_LEN", str(_DEDUP_KEY_LEN_DEFAULT))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _DEDUP_KEY_LEN_DEFAULT
+    if value <= 0:
+        return _DEDUP_KEY_LEN_DEFAULT
+    return value
 
 
 def _resolve_base_dir(base_dir: Optional[str]) -> Path:
