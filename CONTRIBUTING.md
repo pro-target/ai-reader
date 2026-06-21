@@ -22,6 +22,11 @@ fastest path from idea to merge is:
 6. **Open a PR.** The PR template will guide you. CI must be green.
    A maintainer will review within a few days.
 
+## Local-dev MCP setup
+
+For local-dev MCP setup (registering `ai-reader-mcp` so your editor can
+drive it), see **MCP registration** in [README.md](./README.md).
+
 ## Style
 
 - Python 3.11+ idioms (`X | None`, `match`, `dataclass(slots=True)`).

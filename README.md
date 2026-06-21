@@ -118,6 +118,88 @@ print(session.message_count)
 
 See [docs/architecture.md](./docs/architecture.md) for the full layering.
 
+## MCP registration
+
+`ai-reader-mcp` is a stdio MCP server. Register it once per host tool.
+Replace `USER` with your username (or drop the absolute path if
+`ai-reader-mcp` is on your `PATH`). **Restart the host tool after editing
+its config** — none of them pick up MCP changes live.
+
+The snippets below use `/home/USER/.local/bin/ai-reader-mcp`. Adjust the
+path if your install lives elsewhere (`which ai-reader-mcp` tells you).
+
+### Claude Code
+
+Edit `~/.claude.json` (top-level `mcpServers` object):
+
+```json
+{
+  "mcpServers": {
+    "ai-reader": {
+      "type": "stdio",
+      "command": "/home/USER/.local/bin/ai-reader-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}
+```
+
+For a single-project registration, commit a `.mcp.json` at the repo root
+(see [`.mcp.json`](./.mcp.json)).
+
+### Codex
+
+Edit `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.ai-reader]
+command = "/home/USER/.local/bin/ai-reader-mcp"
+args = []
+```
+
+### Gemini CLI
+
+Edit `~/.gemini/settings.json` (`mcpServers` object):
+
+```json
+{
+  "mcpServers": {
+    "ai-reader": {
+      "command": "/home/USER/.local/bin/ai-reader-mcp",
+      "args": [],
+      "timeout": 60
+    }
+  }
+}
+```
+
+### OpenCode
+
+Edit `~/.config/opencode/opencode.json` (top-level `mcp` object).
+OpenCode differs from the others in three ways: `type` is `"local"` (not
+`"stdio"`), `command` is a single fused array (command + args together),
+and the env key is `"environment"`.
+
+```json
+{
+  "mcp": {
+    "ai-reader": {
+      "type": "local",
+      "command": ["/home/USER/.local/bin/ai-reader-mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+### Notes
+
+- `ai-reader-mcp` must be on `PATH`, or use the absolute path as above.
+- Restart the host tool after editing its config file.
+- The server is read-only; any caller that can reach it can read any
+  session. See [Design boundaries](#design-boundaries).
+
 ## Development
 
 ```bash
