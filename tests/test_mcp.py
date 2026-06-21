@@ -403,57 +403,141 @@ def test_pi_text_variants() -> None:
 # --- _extract_messages dispatcher ------------------------------------------
 
 
-def test_extract_messages_dispatches_to_claude(tmp_path: Path) -> None:
+def test_extract_messages_dispatches_to_claude(
+    fake_claude_session: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dispatcher routes Claude sessions through read_messages(uuid)."""
     from ai_reader.parsers.models import Session
-    p = tmp_path / "x.jsonl"
-    p.write_text(
-        '{"type":"user","message":{"role":"user","content":"y"}}\n',
-        encoding="utf-8",
+
+    base = fake_claude_session.parent.parent  # .../projects (parent of proj-a)
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: base
     )
     s = Session(
-        uuid="u", agent=AgentName.CLAUDE, title="t", date=datetime.now(tz=timezone.utc),
-        path=str(p), message_count=1,
+        uuid="test-claude-1",
+        agent=AgentName.CLAUDE,
+        title="t",
+        date=datetime.now(tz=timezone.utc),
+        path=str(fake_claude_session),
+        message_count=1,
     )
-    assert _extract_messages(s)[0]["content"] == "y"
+    assert _extract_messages(s)[0]["content"] == "Hello, world"
 
 
-def test_extract_messages_dispatches_to_codex(tmp_path: Path) -> None:
+def test_extract_messages_dispatches_to_codex(
+    fake_codex_session: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dispatcher routes Codex sessions through read_messages(uuid)."""
     from ai_reader.parsers.models import Session
-    p = tmp_path / "x.jsonl"
-    p.write_text(
-        '{"type":"response_item","payload":{"type":"message","role":"user",'
-        '"content":[{"type":"text","text":"z"}]}}\n',
-        encoding="utf-8",
+
+    base = fake_codex_session.parent.parent.parent  # .../sessions
+    monkeypatch.setattr(
+        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: base
     )
     s = Session(
-        uuid="u", agent=AgentName.CODEX, title="t", date=datetime.now(tz=timezone.utc),
-        path=str(p), message_count=1,
+        uuid="test-codex-1",
+        agent=AgentName.CODEX,
+        title="t",
+        date=datetime.now(tz=timezone.utc),
+        path=str(fake_codex_session),
+        message_count=1,
     )
-    assert _extract_messages(s)[0]["content"] == "z"
+    msgs = _extract_messages(s)
+    assert msgs
+    assert msgs[0]["role"] == "user"
 
 
-def test_extract_messages_dispatches_to_pi(tmp_path: Path) -> None:
+def test_extract_messages_dispatches_to_pi(
+    fake_pi_session: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dispatcher routes Pi sessions through read_messages(uuid)."""
     from ai_reader.parsers.models import Session
-    p = tmp_path / "x.jsonl"
-    p.write_text(
-        '{"type":"message","message":{"role":"user",'
-        '"content":[{"type":"text","text":"p"}]}}\n',
-        encoding="utf-8",
+
+    base = fake_pi_session.parent  # .../sessions/--tmp-work--
+    monkeypatch.setattr(
+        "ai_reader.parsers.pi._resolve_base_dir", lambda bd=None: base
     )
     s = Session(
-        uuid="u", agent=AgentName.PI, title="t", date=datetime.now(tz=timezone.utc),
-        path=str(p), message_count=1,
+        uuid="test-pi-1",
+        agent=AgentName.PI,
+        title="t",
+        date=datetime.now(tz=timezone.utc),
+        path=str(fake_pi_session),
+        message_count=1,
     )
-    assert _extract_messages(s)[0]["content"] == "p"
+    msgs = _extract_messages(s)
+    assert msgs
+    assert msgs[0]["content"] == "Add Pi support"
 
 
-def test_extract_messages_unsupported_agent(tmp_path: Path) -> None:
+def test_extract_messages_dispatches_to_opencode(
+    fake_opencode_db_with_tools: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OpenCode dispatches via the parser registry; {role, content} only."""
+    monkeypatch.setenv("OPENCODE_DB", str(fake_opencode_db_with_tools))
     from ai_reader.parsers.models import Session
+
     s = Session(
-        uuid="u", agent=AgentName.OPENCODE, title="t",
-        date=datetime.now(tz=timezone.utc), path=str(tmp_path / "x"), message_count=0,
+        uuid="oc-tools-1",
+        agent=AgentName.OPENCODE,
+        title="t",
+        date=datetime.now(tz=timezone.utc),
+        path=str(fake_opencode_db_with_tools),
+        message_count=3,
     )
-    assert _extract_messages(s) == []
+    msgs = _extract_messages(s)
+    assert msgs, "expected non-empty opencode messages"
+    for m in msgs:
+        assert set(m.keys()) == {"role", "content"}
+    roles = [m["role"] for m in msgs]
+    assert roles == ["user", "assistant"]
+
+
+def test_extract_messages_dispatches_to_antigravity(
+    fake_antigravity_brain: Path,
+) -> None:
+    """Antigravity dispatches via the parser registry; {role, content} only.
+
+    The autouse ``_isolate_ai_reader_home`` fixture points
+    ``AI_READER_HOME`` at the same fake tree ``fake_antigravity_brain``
+    builds under, so the parser's ``read_messages`` finds the brain.
+    """
+    from ai_reader.parsers.models import Session
+
+    s = Session(
+        uuid="test-ag-1",
+        agent=AgentName.ANTIGRAVITY,
+        title="t",
+        date=datetime.now(tz=timezone.utc),
+        path=str(fake_antigravity_brain),
+        message_count=2,
+    )
+    msgs = _extract_messages(s)
+    assert msgs, "expected non-empty antigravity messages"
+    for m in msgs:
+        assert set(m.keys()) == {"role", "content"}
+
+
+def test_extract_messages_all_agents_dispatch() -> None:
+    """Every supported agent resolves to a parser in the registry.
+
+    The dispatcher has no "unsupported agent" path anymore — all 5
+    agents route through ``_PARSERS``.  A nonexistent uuid yields ``[]``
+    via the try/except, not via a missing-parser branch.
+    """
+    from ai_reader.parsers.models import Session
+
+    for agent in AgentName:
+        s = Session(
+            uuid="never-real-xyzzy",
+            agent=agent,
+            title="t",
+            date=datetime.now(tz=timezone.utc),
+            path="/nonexistent",
+            message_count=0,
+        )
+        result = _extract_messages(s)
+        assert isinstance(result, list)
 
 
 # --- list_sessions / read_session / search_sessions error paths -----------
