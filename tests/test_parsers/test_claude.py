@@ -303,3 +303,70 @@ def test_message_is_frozen(fake_claude_session: Path, tmp_sessions_dir: Path) ->
     assert isinstance(msgs[0], Message)
     with pytest.raises(Exception):
         msgs[0].role = "tool"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# extract_title priority chain
+# ---------------------------------------------------------------------------
+
+
+def test_extract_title_priority(tmp_path: Path) -> None:
+    """``custom-title`` wins over ``ai-title`` and user-message text."""
+    jsonl = tmp_path / "titles.jsonl"
+    jsonl.write_text(
+        '{"type":"custom-title","customTitle":"My custom title"}\n'
+        '{"type":"ai-title","aiTitle":"AI generated title"}\n'
+        '{"type":"user","message":{"role":"user","content":"user text"}}\n',
+        encoding="utf-8",
+    )
+    assert claude.extract_title([], jsonl) == "My custom title"
+    messages = claude._extract_messages_from_jsonl(jsonl)
+    assert claude.extract_title(messages, jsonl) == "My custom title"
+
+
+# ---------------------------------------------------------------------------
+# claude_derive: decision + task summarisation
+# ---------------------------------------------------------------------------
+
+
+def test_summarize_task_skip_stopword_tail() -> None:
+    """A trailing ``thanks`` falls through to the prior user message."""
+    from ai_reader.parsers.claude_derive import summarize_task
+    from ai_reader.parsers.models import Message
+
+    messages = [
+        Message(
+            role="user",
+            text="Refactor the parser to handle custom-title events please",
+            tool_use=(),
+            tool_result=(),
+        ),
+        Message(role="user", text="thanks", tool_use=(), tool_result=()),
+    ]
+    out = summarize_task(messages)
+    assert "Refactor" in out
+    assert "parser" in out
+    assert "thanks" not in out.lower()
+
+
+def test_extract_decisions_tech_filter() -> None:
+    """Decision sentences with a tech token are kept; noise is dropped."""
+    from ai_reader.parsers.claude_derive import extract_decisions
+    from ai_reader.parsers.models import Message
+
+    messages = [
+        Message(
+            role="assistant",
+            text=(
+                "I decided to use port 8080 for the api server. "
+                "The fridge should hum louder. "
+                "We chose docker over bare metal."
+            ),
+            tool_use=(),
+            tool_result=(),
+        ),
+    ]
+    decisions = extract_decisions(messages)
+    assert any("port 8080" in d for d in decisions)
+    assert any("docker" in d.lower() for d in decisions)
+    assert not any("fridge" in d.lower() for d in decisions)

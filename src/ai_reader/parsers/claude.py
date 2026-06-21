@@ -6,14 +6,25 @@ Source layout::
 
 Each line is a JSON object with the following relevant keys:
 
-* ``type``         — ``"user"``, ``"assistant"``, ``"ai-title"`` or
-  other event types (``"queue-operation"``, …).
+* ``type``         — ``"user"``, ``"assistant"``, ``"custom-title"``,
+  ``"ai-title"`` or other event types (``"queue-operation"``, …).
 * ``timestamp``    — ISO 8601 string (last record wins for the date).
 * ``message``      — for ``user``/``assistant`` records only.  Either a
   string or a list of parts, where each part has ``type`` (``"text"``,
   ``"tool_use"``, ``"tool_result"``) and a ``text`` / ``content`` field.
 * ``aiTitle``      — for ``"ai-title"`` records, optional auto-generated
   title.
+* ``customTitle``  — for ``"custom-title"`` records, optional
+  user-supplied title (highest priority).
+
+Title resolution order used by :func:`extract_title` and
+:func:`_scan_file` is:
+
+1. ``custom-title`` event value.
+2. ``ai-title`` event value.
+3. First user message text (first line, stripped, max 100 chars).
+4. ``chat-HHMM`` derived from the JSONL file mtime, falling back to
+   ``"Untitled"``.
 
 The base directory can be overridden for tests by passing ``base_dir``
 explicitly to the module-level functions.  When unset, the directory
@@ -28,7 +39,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .models import AgentName, Message, Session
 
@@ -90,13 +101,104 @@ def _normalise_title(raw: str) -> str:
     return raw.replace("\n", " ").replace("\r", " ").strip()[:_TITLE_MAX_LEN]
 
 
+def _scan_titles_from_jsonl(
+    jsonl_path: Path,
+) -> tuple[Optional[str], Optional[str]]:
+    """Return ``(custom_title, ai_title)`` from a Claude JSONL file."""
+    custom_title: Optional[str] = None
+    ai_title: Optional[str] = None
+    try:
+        with jsonl_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                rec_type = record.get("type")
+                if rec_type == "custom-title" and custom_title is None:
+                    raw = record.get("customTitle", "")
+                    if isinstance(raw, str) and raw.strip():
+                        custom_title = raw.strip()
+                elif rec_type == "ai-title" and ai_title is None:
+                    raw = record.get("aiTitle", "")
+                    if isinstance(raw, str) and raw.strip():
+                        ai_title = raw.strip()
+    except OSError:
+        pass
+    return custom_title, ai_title
+
+
+def _first_user_text_from_messages(messages: List[Message]) -> Optional[str]:
+    """Return the first non-empty user message text, or ``None``."""
+    for msg in messages:
+        if msg.role == "user" and msg.text.strip():
+            return msg.text
+    return None
+
+
+def _resolve_title(
+    custom_title: Optional[str],
+    ai_title: Optional[str],
+    first_user_text: Optional[str],
+    jsonl_path: Optional[Path],
+) -> Optional[str]:
+    """Pick a session title from the available signals.
+
+    Returns ``None`` when no signal yields a usable title.
+    """
+    if custom_title:
+        return _normalise_title(custom_title)
+    if ai_title:
+        return _normalise_title(ai_title)
+    if first_user_text:
+        return _normalise_title(first_user_text)
+    if jsonl_path is not None:
+        try:
+            ts = datetime.fromtimestamp(jsonl_path.stat().st_mtime)
+            return _normalise_title(f"chat-{ts.strftime('%H%M')}")
+        except OSError:
+            pass
+    return None
+
+
+def extract_title(
+    messages: List[Message], jsonl_path: Optional[Path] = None
+) -> str:
+    """Resolve a Claude session title from jsonl events and message content.
+
+    Priority:
+
+    1. ``custom-title`` event with a non-empty string value (only when
+       ``jsonl_path`` is provided).
+    2. ``ai-title`` event with a non-empty string value (only when
+       ``jsonl_path`` is provided).
+    3. First user message in ``messages`` — first line, stripped, max
+       100 characters.
+    4. ``chat-HHMM`` derived from the ``jsonl_path`` mtime, falling
+       back to ``"Untitled"``.
+    """
+    if jsonl_path is not None:
+        custom_title, ai_title = _scan_titles_from_jsonl(jsonl_path)
+    else:
+        custom_title, ai_title = None, None
+    first_user_text = _first_user_text_from_messages(messages)
+    title = _resolve_title(custom_title, ai_title, first_user_text, jsonl_path)
+    return title if title is not None else "Untitled"
+
+
 def _scan_file(jsonl_path: Path) -> Optional[Session]:
     """Build a :class:`Session` from one Claude JSONL file.
 
     Returns ``None`` if the file yields no usable title/timestamp.
     """
+    custom_title: Optional[str] = None
     ai_title: Optional[str] = None
-    last_user_text: Optional[str] = None
+    first_user_text: Optional[str] = None
     last_timestamp: Optional[datetime] = None
     message_count = 0
 
@@ -118,27 +220,32 @@ def _scan_file(jsonl_path: Path) -> Optional[Session]:
                     last_timestamp = ts
 
                 rec_type = record.get("type")
-                if rec_type == "ai-title":
-                    title = record.get("aiTitle", "")
-                    if isinstance(title, str) and title.strip():
-                        ai_title = title.strip()
+                if rec_type == "custom-title" and custom_title is None:
+                    raw = record.get("customTitle", "")
+                    if isinstance(raw, str) and raw.strip():
+                        custom_title = raw.strip()
+                elif rec_type == "ai-title" and ai_title is None:
+                    raw = record.get("aiTitle", "")
+                    if isinstance(raw, str) and raw.strip():
+                        ai_title = raw.strip()
                 elif rec_type == "user":
                     message_count += 1
                     text = _extract_text_from_user_message(
                         record.get("message", {}) or {}
                     )
-                    if text and not text.startswith("<"):
-                        last_user_text = text
+                    if (
+                        text
+                        and not text.startswith("<")
+                        and first_user_text is None
+                    ):
+                        first_user_text = text
                 elif rec_type == "assistant":
                     message_count += 1
     except OSError:
         return None
 
-    if ai_title:
-        title = _normalise_title(ai_title)
-    elif last_user_text:
-        title = _normalise_title(last_user_text)
-    else:
+    title = _resolve_title(custom_title, ai_title, first_user_text, jsonl_path)
+    if title is None:
         return None
 
     if last_timestamp is None:
@@ -223,13 +330,84 @@ def read_session(uuid: str, base_dir: Optional[str] = None) -> Session:
     return session
 
 
-def _extract_messages_from_jsonl(path: Path) -> List[Message]:
-    """Read a Claude JSONL file into structured :class:`Message` objects.
+def _parse_jsonl_line(line: str) -> Optional[Message]:
+    """Parse one Claude JSONL line into a :class:`Message`, or skip it.
 
+    Returns ``None`` for blank lines, malformed JSON, non-dict records,
+    and records whose ``type`` is not ``"user"`` or ``"assistant"``.
     Assistant records yield ``text`` (from ``text`` blocks) and
     ``tool_use`` entries (from ``tool_use`` blocks).  User records yield
     ``text`` plus ``tool_result`` entries for any ``tool_result`` blocks
     they carry (Claude embeds tool results in user-role records).
+    """
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(record, dict):
+        return None
+    rec_type = record.get("type")
+    if rec_type not in ("user", "assistant"):
+        return None
+    payload = record.get("message") or {}
+    if not isinstance(payload, dict):
+        return None
+    content = payload.get("content", "")
+    text_chunks: List[str] = []
+    tool_use: List[dict] = []
+    tool_result: List[dict] = []
+    if isinstance(content, list):
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            if part_type == "text":
+                text = part.get("text", "")
+                if isinstance(text, str) and text:
+                    text_chunks.append(text)
+            elif part_type == "tool_use":
+                name = part.get("name", "")
+                raw_input = part.get("input", "")
+                if isinstance(raw_input, str):
+                    input_str = raw_input
+                else:
+                    try:
+                        input_str = json.dumps(
+                            raw_input, ensure_ascii=False
+                        )
+                    except (TypeError, ValueError):
+                        input_str = str(raw_input)
+                tool_use.append({"name": name, "input": input_str})
+            elif part_type == "tool_result":
+                result_content = part.get("content", "")
+                if isinstance(result_content, list):
+                    pieces: List[str] = []
+                    for piece in result_content:
+                        if isinstance(piece, dict):
+                            t = piece.get("text", "")
+                            if isinstance(t, str) and t:
+                                pieces.append(t)
+                    result_str = "\n".join(pieces)
+                elif isinstance(result_content, str):
+                    result_str = result_content
+                else:
+                    result_str = ""
+                tool_result.append({"content": result_str})
+    elif isinstance(content, str):
+        text_chunks.append(content)
+    return Message(
+        role=rec_type,
+        text="\n".join(text_chunks),
+        tool_use=tuple(tool_use),
+        tool_result=tuple(tool_result),
+    )
+
+
+def _extract_messages_from_jsonl(path: Path) -> List[Message]:
+    """Read a Claude JSONL file into structured :class:`Message` objects.
 
     Lines that are not valid JSON or not ``user``/``assistant`` records
     are silently skipped.  An :class:`OSError` reading the file returns
@@ -239,74 +417,9 @@ def _extract_messages_from_jsonl(path: Path) -> List[Message]:
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                rec_type = record.get("type")
-                if rec_type not in ("user", "assistant"):
-                    continue
-                payload = record.get("message") or {}
-                if not isinstance(payload, dict):
-                    continue
-                content = payload.get("content", "")
-                text_chunks: List[str] = []
-                tool_use: List[dict] = []
-                tool_result: List[dict] = []
-                if isinstance(content, list):
-                    for part in content:
-                        if not isinstance(part, dict):
-                            continue
-                        part_type = part.get("type")
-                        if part_type == "text":
-                            text = part.get("text", "")
-                            if isinstance(text, str) and text:
-                                text_chunks.append(text)
-                        elif part_type == "tool_use":
-                            name = part.get("name", "")
-                            raw_input = part.get("input", "")
-                            if isinstance(raw_input, str):
-                                input_str = raw_input
-                            else:
-                                try:
-                                    input_str = json.dumps(
-                                        raw_input, ensure_ascii=False
-                                    )
-                                except (TypeError, ValueError):
-                                    input_str = str(raw_input)
-                            tool_use.append({"name": name, "input": input_str})
-                        elif part_type == "tool_result":
-                            result_content = part.get("content", "")
-                            if isinstance(result_content, list):
-                                # Tool results can themselves be a list
-                                # of text blocks; concatenate them.
-                                pieces: List[str] = []
-                                for piece in result_content:
-                                    if isinstance(piece, dict):
-                                        t = piece.get("text", "")
-                                        if isinstance(t, str) and t:
-                                            pieces.append(t)
-                                result_str = "\n".join(pieces)
-                            elif isinstance(result_content, str):
-                                result_str = result_content
-                            else:
-                                result_str = ""
-                            tool_result.append({"content": result_str})
-                elif isinstance(content, str):
-                    text_chunks.append(content)
-                messages.append(
-                    Message(
-                        role=rec_type,
-                        text="\n".join(text_chunks),
-                        tool_use=tuple(tool_use),
-                        tool_result=tuple(tool_result),
-                    )
-                )
+                msg = _parse_jsonl_line(line)
+                if msg is not None:
+                    messages.append(msg)
     except OSError:
         return messages
     return messages
