@@ -20,6 +20,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from ai_reader import __version__  # noqa: E402
+from ai_reader.agents import _detect_agent_with_source  # noqa: E402
 from ai_reader.parsers import AgentName, Session  # noqa: E402
 from ai_reader.parsers import antigravity, claude, codex, opencode, pi  # noqa: E402
 
@@ -371,6 +372,21 @@ def _run_read(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_detect_agent(args: argparse.Namespace) -> int:
+    agent, source = _detect_agent_with_source()
+    if agent is None:
+        return _exit_with_error(
+            "could not detect current agent; set AGENT_NAME, AI_AGENT, "
+            "CODING_AGENT, CODEX_HOME, CLAUDECODE or OPENCODE",
+        )
+    if args.quiet:
+        print(agent.value.lower())
+    else:
+        print(f"agent:    {agent.value}")
+        print(f"source:   {source}")
+    return 0
+
+
 def _run_search(args: argparse.Namespace) -> int:
     query = (args.query or "").strip()
     if not query:
@@ -467,6 +483,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_filter_group(search_p)
     search_p.set_defaults(func=_run_search)
+
+    detect_p = sub.add_parser(
+        "detect-agent", help="Detect the current AI agent from env vars."
+    )
+    detect_p.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Print just the agent name (e.g. 'claude').",
+    )
+    detect_p.set_defaults(func=_run_detect_agent)
 
     return parser
 
