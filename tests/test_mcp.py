@@ -31,6 +31,7 @@ from ai_reader.mcp_server import (
     _extract_messages_codex,
     _extract_messages_pi,
     _iso,
+    _MESSAGES_CAP,
     _pi_text,
     _session_summary,
     _target_agents,
@@ -601,7 +602,9 @@ def test_read_session_returns_capped_role_content_list(
     fake_claude_session: Path, tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``read_session`` must still return a list of ``{role, content}`` dicts
-    (no tool_use/tool_result keys leak into MCP output)."""
+    (no tool_use/tool_result keys leak into MCP output).  Pagination
+    fields ``total``/``offset``/``limit`` ride along; the default limit
+    echoes :data:`_MESSAGES_CAP` but is no longer a silent hard cap."""
     base = str(tmp_sessions_dir / ".claude" / "projects")
     monkeypatch.setattr(
         "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
@@ -616,6 +619,96 @@ def test_read_session_returns_capped_role_content_list(
         assert set(m.keys()) == {"role", "content"}
     assert msgs[0] == {"role": "user", "content": "Hello, world"}
     assert msgs[1] == {"role": "assistant", "content": "Hi there!"}
+    # Pagination fields.
+    assert result["total"] == 2
+    assert result["offset"] == 0
+    assert result["limit"] == _MESSAGES_CAP
+
+
+def test_read_session_pagination_default_returns_all(
+    fake_claude_session: Path, tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default offset=0/limit=_MESSAGES_CAP returns the full list."""
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = read_session(uuid="test-claude-1", agent="claude")
+    assert result["total"] == len(result["messages"])
+    assert result["offset"] == 0
+
+
+def test_read_session_pagination_offset_limit_slice(
+    fake_claude_session: Path, tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """offset/limit slice the projected message list."""
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    # offset=1 skips the user message; limit=10 leaves the assistant msg.
+    result = read_session(uuid="test-claude-1", agent="claude", offset=1, limit=10)
+    msgs = result["messages"]
+    assert len(msgs) == 1
+    assert msgs[0]["role"] == "assistant"
+    assert result["total"] == 2
+    assert result["offset"] == 1
+    assert result["limit"] == 10
+
+
+def test_read_session_pagination_limit_caps_at_more_than_100(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session with 150 user messages: default limit returns 100, total
+    reports 150, limit>100 returns all.  Proves the cap is no longer
+    silent/hard."""
+    # Synthesize a Claude session with 150 user messages.
+    records = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": f"msg-{i}"},
+            "timestamp": "2026-06-14T10:00:00Z",
+            "sessionId": "big-1",
+        }
+        for i in range(150)
+    ]
+    jsonl = tmp_sessions_dir / ".claude" / "projects" / "proj-big" / "big-1.jsonl"
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
+    jsonl.write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+    )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+
+    default_capped = read_session(uuid="big-1", agent="claude")
+    assert default_capped["total"] == 150
+    assert len(default_capped["messages"]) == _MESSAGES_CAP  # 100
+    assert default_capped["messages"][0]["content"] == "msg-0"
+    assert default_capped["messages"][-1]["content"] == f"msg-{_MESSAGES_CAP - 1}"
+
+    # Raise the limit → get everything.
+    all_msgs = read_session(uuid="big-1", agent="claude", limit=0)
+    assert all_msgs["total"] == 150
+    assert len(all_msgs["messages"]) == 150
+
+    # offset past the end → empty list, total still 150.
+    tail = read_session(uuid="big-1", agent="claude", offset=145, limit=10)
+    assert tail["total"] == 150
+    assert len(tail["messages"]) == 5
+    assert tail["messages"][0]["content"] == "msg-145"
+
+
+def test_read_session_pagination_negative_offset_rejected(
+    fake_claude_session: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = str(fake_claude_session.parent.parent)
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+    result = read_session(uuid="test-claude-1", agent="claude", offset=-1)
+    assert result.get("error") == "invalid_argument"
 
 
 def test_read_session_mcp_drops_tool_messages(

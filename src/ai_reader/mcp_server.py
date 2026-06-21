@@ -210,28 +210,38 @@ def _project_messages(messages: Sequence[Any]) -> List[dict[str, Any]]:
     """Project parser ``Message`` objects to ``{role, content}`` dicts.
 
     Only ``user``/``assistant`` roles are surfaced, preserving the
-    historical MCP output shape; ``tool`` messages are dropped.  Capped
-    at :data:`_MESSAGES_CAP` so MCP output stays bounded.
+    historical MCP output shape; ``tool`` messages are dropped.  No cap
+    is applied here — pagination (``offset``/``limit``) is the caller's
+    responsibility.
     """
     out: List[dict[str, Any]] = []
     for m in messages:
-        if len(out) >= _MESSAGES_CAP:
-            break
         if m.role not in ("user", "assistant"):
             continue
         out.append({"role": m.role, "content": m.text})
     return out
 
 
-def _extract_messages(session: Session) -> List[dict[str, Any]]:
-    """Best-effort message extraction for a session; capped at :data:`_MESSAGES_CAP`.
+def _extract_messages(
+    session: Session,
+    offset: int = 0,
+    limit: int = _MESSAGES_CAP,
+) -> List[dict[str, Any]]:
+    """Best-effort message extraction for a session, with pagination.
 
     Single dispatcher covering ALL supported agents
     (claude/codex/opencode/pi/antigravity): resolves the owning parser
     from :data:`_PARSERS`, calls its public ``read_messages(session.uuid)``,
-    and projects each :class:`~ai_reader.parsers.models.Message` to a
-    ``{role, content}`` dict.  Only ``user``/``assistant`` roles surface
-    (historical MCP shape); ``tool`` messages are dropped.
+    projects each :class:`~ai_reader.parsers.models.Message` to a
+    ``{role, content}`` dict, then applies ``[offset:offset+limit]``.
+    Only ``user``/``assistant`` roles surface (historical MCP shape);
+    ``tool`` messages are dropped before pagination, so ``offset``/``limit``
+    index into the *projected* list.
+
+    ``limit`` defaults to :data:`_MESSAGES_CAP` (the historical cap) but
+    is no longer a hard silent ceiling — callers may raise it.  A
+    non-positive ``limit`` is treated as "no upper bound" (returns every
+    projected message from ``offset`` onward).
 
     Any parser-level I/O or decode failure (``FileNotFoundError``,
     ``ValueError``, ``OSError``) yields ``[]`` so MCP callers always get
@@ -244,7 +254,12 @@ def _extract_messages(session: Session) -> List[dict[str, Any]]:
         raw = parser.read_messages(session.uuid)
     except (FileNotFoundError, ValueError, OSError):
         return []
-    return _project_messages(raw)
+    projected = _project_messages(raw)
+    if offset > 0:
+        projected = projected[offset:]
+    if limit and limit > 0:
+        projected = projected[:limit]
+    return projected
 
 
 @mcp.tool()
@@ -272,20 +287,40 @@ def list_sessions(agent: Optional[str] = None) -> List[dict[str, Any]]:
 
 
 @mcp.tool()
-def read_session(uuid: str, agent: str) -> dict[str, Any]:
+def read_session(
+    uuid: str,
+    agent: str,
+    offset: int = 0,
+    limit: int = _MESSAGES_CAP,
+) -> dict[str, Any]:
     """Read a single session by ``uuid`` and ``agent``.
 
     Args:
         uuid: Session identifier.
         agent: One of ``claude``, ``codex``, ``opencode``, ``antigravity``, ``pi``.
+        offset: Zero-based index of the first message to return
+            (applied to the projected ``{role, content}`` list).
+        limit: Maximum number of messages to return.  Defaults to
+            :data:`_MESSAGES_CAP` (100).  A non-positive value means
+            "no upper bound".
 
     Returns:
-        A dict with session metadata and a ``messages`` list (capped at
-        100 entries) on success.  On a missing session, returns an
-        ``error`` dict instead of raising.
+        A dict with session metadata plus:
+
+        * ``messages`` — the projected ``{role, content}`` list, sliced
+          to ``[offset:offset+limit]``.
+        * ``total`` — the full uncapped projected message count (the
+          length the slice was taken from).
+        * ``offset`` / ``limit`` — the pagination echo values actually
+          used.
+
+        On a missing session, returns an ``error`` dict instead of
+        raising.
     """
     if not uuid or not str(uuid).strip():
         return {"error": "invalid_argument", "message": "uuid must be non-empty"}
+    if offset < 0:
+        return {"error": "invalid_argument", "message": "offset must be >= 0"}
     try:
         agent_name = _coerce_agent(agent)
     except ValueError as exc:
@@ -301,8 +336,18 @@ def read_session(uuid: str, agent: str) -> dict[str, Any]:
             "agent": agent_name.value,
         }
 
+    projected = _extract_messages(session, offset=0, limit=0)
+    total = len(projected)
+    if offset > 0:
+        projected = projected[offset:]
+    if limit and limit > 0:
+        projected = projected[:limit]
+
     summary = _session_summary(session)
-    summary["messages"] = _extract_messages(session)
+    summary["messages"] = projected
+    summary["total"] = total
+    summary["offset"] = offset
+    summary["limit"] = limit
     return summary
 
 
