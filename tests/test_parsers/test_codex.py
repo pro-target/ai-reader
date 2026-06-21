@@ -203,6 +203,69 @@ def test_read_messages_invalid_uuid(tmp_sessions_dir: Path) -> None:
         codex.read_messages("../escape", base_dir=str(tmp_sessions_dir / ".codex" / "sessions"))
 
 
+def test_extract_event_msg_user_message(codex_event_msg_jsonl: Path) -> None:
+    msgs = codex._extract_messages_from_rollout(codex_event_msg_jsonl)
+    user_msgs = [m for m in msgs if m.role == "user"]
+    assert len(user_msgs) == 1
+    assert user_msgs[0].text == "hello world from response_item"
+    assert sum(1 for m in msgs if m.role == "assistant") == 1
+
+
+def test_discover_archived_sessions(tmp_sessions_dir: Path) -> None:
+    active_uuid = "active-uuid-1"
+    archived_uuid = "archived-uuid-1"
+    active = (
+        tmp_sessions_dir
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "06"
+        / "14"
+        / f"rollout-2026-06-14T10-00-00-{active_uuid}.jsonl"
+    )
+    archived = (
+        tmp_sessions_dir
+        / ".codex"
+        / "archived_sessions"
+        / "2026"
+        / "05"
+        / "01"
+        / f"rollout-2026-05-01T10-00-00-{archived_uuid}.jsonl"
+    )
+    active.parent.mkdir(parents=True, exist_ok=True)
+    active.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-06-14T10:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": active_uuid, "timestamp": "2026-06-14T10:00:00Z"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    archived.parent.mkdir(parents=True, exist_ok=True)
+    archived.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-05-01T10:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": archived_uuid, "timestamp": "2026-05-01T10:00:00Z"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    sessions = codex.list_sessions(
+        base_dir=str(tmp_sessions_dir / ".codex" / "sessions")
+    )
+    uuids = [s.uuid for s in sessions]
+    assert active_uuid in uuids
+    assert archived_uuid in uuids
+    assert len(sessions) == 2
+
+
 def test_dedup_key_len_default_is_256() -> None:
     assert codex.get_dedup_key_len() == 256
 
@@ -212,6 +275,7 @@ def test_dedup_key_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AI_READER_DEDUP_KEY_LEN", "1024")
     try:
         assert codex.get_dedup_key_len() == 1024
+        assert len(codex._dedup_key("x" * 5000)) == 1024
     finally:
         monkeypatch.delenv("AI_READER_DEDUP_KEY_LEN", raising=False)
     assert codex.get_dedup_key_len() == 256
@@ -231,3 +295,123 @@ def test_dedup_key_non_positive_env_falls_back(monkeypatch: pytest.MonkeyPatch) 
         assert codex.get_dedup_key_len() == 256
     finally:
         monkeypatch.delenv("AI_READER_DEDUP_KEY_LEN", raising=False)
+
+
+def test_event_msg_filters_system_noise(tmp_sessions_dir: Path) -> None:
+    """event_msg.user_message payloads starting with system-noise prefixes
+    must be skipped, not projected as user-role messages."""
+    uuid_str = "system-noise-uuid"
+    rollout = (
+        tmp_sessions_dir
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "06"
+        / "14"
+        / f"rollout-2026-06-14T12-00-00-{uuid_str}.jsonl"
+    )
+    rollout.parent.mkdir(parents=True, exist_ok=True)
+    rollout.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-14T12:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"id": uuid_str, "timestamp": "2026-06-14T12:00:00Z"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-14T12:00:01Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": "<command-message>orchestrator</command-message>\n<command-name>/orchestrator</command-name>",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-14T12:00:02Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": "<system-reminder>agent runtime injected this</system-reminder>",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-14T12:00:03Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": "a real user prompt with enough length to pass the gate",
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    msgs = codex._extract_messages_from_rollout(rollout)
+    user_texts = [m.text for m in msgs if m.role == "user"]
+    assert user_texts == ["a real user prompt with enough length to pass the gate"]
+
+
+def test_event_msg_dedup_with_response_item(tmp_sessions_dir: Path) -> None:
+    """Same user text in response_item and event_msg → 1 message after dedup,
+    regardless of dedup key length."""
+    uuid_str = "dedup-cross-type-uuid"
+    long_prompt = "x" * 500 + " distinctive-tail-marker-zzz"
+    rollout = (
+        tmp_sessions_dir
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "06"
+        / "14"
+        / f"rollout-2026-06-14T13-00-00-{uuid_str}.jsonl"
+    )
+    rollout.parent.mkdir(parents=True, exist_ok=True)
+    rollout.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-14T13:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"id": uuid_str, "timestamp": "2026-06-14T13:00:00Z"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-14T13:00:01Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "text", "text": long_prompt}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-14T13:00:02Z",
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": long_prompt},
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    msgs = codex._extract_messages_from_rollout(rollout)
+    user_msgs = [m for m in msgs if m.role == "user"]
+    assert len(user_msgs) == 1
+    assert user_msgs[0].text == long_prompt

@@ -681,3 +681,11 @@ def codex_sample_jsonl(tmp_path: Path) -> Path:
     dest = tmp_path / "codex_sample.jsonl"
     shutil.copyfile(src, dest)
     return dest
+
+
+@pytest.fixture
+def codex_event_msg_jsonl(tmp_path: Path) -> Path:
+    src = Path(__file__).parent / "fixtures" / "codex_event_msg.jsonl"
+    dest = tmp_path / "codex_event_msg.jsonl"
+    shutil.copyfile(src, dest)
+    return dest

@@ -293,7 +293,7 @@ def test_extract_messages_dispatches_to_codex(
 
     base = fake_codex_session.parent.parent.parent  # .../sessions
     monkeypatch.setattr(
-        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: base
+        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: [base]
     )
     s = Session(
         uuid="test-codex-1",

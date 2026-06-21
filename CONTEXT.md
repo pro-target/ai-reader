@@ -28,7 +28,7 @@ there is no access layer in front of the parsers. See Design boundaries in READM
 | Agent | Storage | Parser |
 |---|---|---|
 | Claude Code | `~/.claude/projects/<project-slug>/<session-uuid>.jsonl` | `parsers/claude.py` |
-| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | `parsers/codex.py` |
+| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` and `~/.codex/archived_sessions/YYYY/MM/DD/rollout-*.jsonl` | `parsers/codex.py` |
 | OpenCode | `~/.local/share/opencode/opencode.db` (SQLite; auto-detects snap/flatpak) | `parsers/opencode.py` |
 | Antigravity | `~/.gemini/antigravity/brain/<session-uuid>/` | `parsers/antigravity.py` |
 

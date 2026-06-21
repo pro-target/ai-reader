@@ -3,6 +3,7 @@
 Source layout (recursive)::
 
     ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
+    ~/.codex/archived_sessions/YYYY/MM/DD/rollout-*.jsonl
 
 Each line is a JSON object with one of the following ``type`` values:
 
@@ -10,16 +11,24 @@ Each line is a JSON object with one of the following ``type`` values:
   this is the canonical UUID.
 * ``"response_item"``  — payload is a message (``type: "message"``,
   ``role: "user"``/``"assistant"``, ``content: [...]``).
-* ``"event_msg"``      — auxiliary events (task_started, agent_message, …).
-  Skipped for message counting.
+* ``"event_msg"``      — extracted when ``payload.type == "user_message"``
+  (the raw user prompt text lives here, not in response_item). System-noise
+  prefixes (``<permissions``, ``<system-reminder>``, ``<command-message>``,
+  ``## Apps``) are filtered out before projection.
 * ``"custom_tool_call"`` and friends — non-message noise, skipped.
+
+User-text dedup across ``response_item`` and ``event_msg`` uses the first
+``$AI_READER_DEDUP_KEY_LEN`` chars (default 256) as the seen-set key.
+Bump the env var if your prompts collide in the first 64 chars but
+diverge later.
 
 The first ``session_meta`` record is authoritative; later ones (rare)
 are ignored.  The first user message text becomes the title, with a
 fallback to ``payload.cwd`` if no user message is found.
 
 The base directory can be overridden by ``base_dir`` or by setting
-``$AI_READER_HOME/.codex/sessions``.
+``$AI_READER_HOME/.codex/sessions`` (the sibling ``archived_sessions``
+directory is scanned automatically).
 """
 
 from __future__ import annotations
@@ -56,13 +65,27 @@ def get_dedup_key_len() -> int:
     return value
 
 
-def _resolve_base_dir(base_dir: Optional[str]) -> Path:
+def _dedup_key(text: str) -> str:
+    """Stable dedup key for user-text seen-set. Length controlled by
+    ``$AI_READER_DEDUP_KEY_LEN`` (default 256). Longer = stricter dedup,
+    cost = more memory per session. 256 covers the first ~4 paragraphs
+    of any realistic user prompt, which is the practical collision zone
+    when the same prompt appears in both ``response_item`` and
+    ``event_msg.user_message``."""
+    return text[:get_dedup_key_len()]
+
+
+def _resolve_base_dir(base_dir: Optional[str]) -> List[Path]:
+    """Resolve Codex session roots: ``sessions/`` and the sibling ``archived_sessions/``."""
     if base_dir:
-        return Path(base_dir).expanduser()
-    env_home = os.environ.get("AI_READER_HOME")
-    if env_home:
-        return Path(env_home).expanduser() / ".codex" / "sessions"
-    return Path("~/.codex/sessions").expanduser()
+        primary = Path(base_dir).expanduser()
+    else:
+        env_home = os.environ.get("AI_READER_HOME")
+        if env_home:
+            primary = Path(env_home).expanduser() / ".codex" / "sessions"
+        else:
+            primary = Path("~/.codex/sessions").expanduser()
+    return [primary, primary.parent / "archived_sessions"]
 
 
 def _parse_iso_timestamp(raw: str) -> Optional[datetime]:
@@ -204,21 +227,28 @@ def _is_valid_uuid(uuid: str) -> bool:
     return True
 
 
-def _discover_files(root: Path) -> List[Path]:
-    """Return all Codex rollout files under ``root``, sorted by mtime desc."""
-    if not root.is_dir():
-        return []
-    files = [p for p in root.glob("**/rollout-*.jsonl") if p.is_file()]
+def _discover_files(roots: List[Path]) -> List[Path]:
+    """Return Codex rollout files under any of ``roots``, deduped and sorted by mtime desc."""
+    seen: set[Path] = set()
+    files: List[Path] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for p in root.glob("**/rollout-*.jsonl"):
+            if not p.is_file() or p in seen:
+                continue
+            seen.add(p)
+            files.append(p)
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return files
 
 
 def list_sessions(base_dir: Optional[str] = None) -> List[Session]:
     """Return every Codex session visible under ``base_dir``."""
-    root = _resolve_base_dir(base_dir)
+    roots = _resolve_base_dir(base_dir)
     sessions: List[Session] = []
     seen_uuids: set[str] = set()
-    for path in _discover_files(root):
+    for path in _discover_files(roots):
         session = _scan_file(path)
         if session is None:
             continue
@@ -237,8 +267,8 @@ def _find_session_file(
 ) -> Tuple[Path, Session]:
     if not _is_valid_uuid(uuid):
         raise ValueError(f"Invalid Codex session uuid: {uuid!r}")
-    root = _resolve_base_dir(base_dir)
-    for path in _discover_files(root):
+    roots = _resolve_base_dir(base_dir)
+    for path in _discover_files(roots):
         try:
             with path.open("r", encoding="utf-8") as fh:
                 for line in fh:
@@ -260,7 +290,7 @@ def _find_session_file(
                         return path, _scan_file(path)  # type: ignore[return-value]
         except OSError:
             continue
-    raise FileNotFoundError(f"Codex session {uuid!r} not found under {root}")
+    raise FileNotFoundError(f"Codex session {uuid!r} not found under {roots}")
 
 
 def read_session(uuid: str, base_dir: Optional[str] = None) -> Session:
@@ -294,6 +324,7 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
     :class:`OSError` returns whatever was collected so far.
     """
     messages: List[Message] = []
+    seen_user_texts: set[str] = set()
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -306,49 +337,67 @@ def _extract_messages_from_rollout(path: Path) -> List[Message]:
                     continue
                 if not isinstance(record, dict):
                     continue
-                if record.get("type") != "response_item":
-                    continue
+                rec_type = record.get("type")
                 payload = record.get("payload") or {}
                 if not isinstance(payload, dict):
                     continue
-                ptype = payload.get("type")
-                if ptype == "message":
-                    role = payload.get("role")
-                    if role not in ("user", "assistant"):
+
+                if rec_type == "response_item":
+                    ptype = payload.get("type")
+                    if ptype == "message":
+                        role = payload.get("role")
+                        if role not in ("user", "assistant"):
+                            continue
+                        text = _codex_message_text(payload)
+                        if role == "user" and text:
+                            key = _dedup_key(text)
+                            if key in seen_user_texts:
+                                continue
+                            seen_user_texts.add(key)
+                        messages.append(Message(role=role, text=text))
+                    elif ptype in ("function_call", "local_shell_call"):
+                        name = payload.get("name") or ptype
+                        arguments = payload.get("arguments", "")
+                        if isinstance(arguments, str):
+                            input_str = arguments
+                        else:
+                            try:
+                                input_str = json.dumps(arguments, ensure_ascii=False)
+                            except (TypeError, ValueError):
+                                input_str = str(arguments)
+                        messages.append(
+                            Message(
+                                role="assistant",
+                                text="",
+                                tool_use=({"name": name, "input": input_str},),
+                            )
+                        )
+                    elif ptype in ("function_call_output", "local_shell_call_output"):
+                        output = payload.get("output", "")
+                        if not isinstance(output, str):
+                            try:
+                                output = json.dumps(output, ensure_ascii=False)
+                            except (TypeError, ValueError):
+                                output = str(output)
+                        messages.append(
+                            Message(
+                                role="tool",
+                                text="",
+                                tool_result=({"content": output},),
+                            )
+                        )
+                # verified against Codex CLI 2026-05 snapshot; recheck on schema change
+                elif rec_type == "event_msg" and payload.get("type") == "user_message":
+                    msg = payload.get("message")
+                    if not isinstance(msg, str) or len(msg) <= 10:
                         continue
-                    text = _codex_message_text(payload)
-                    messages.append(Message(role=role, text=text))
-                elif ptype in ("function_call", "local_shell_call"):
-                    name = payload.get("name") or ptype
-                    arguments = payload.get("arguments", "")
-                    if isinstance(arguments, str):
-                        input_str = arguments
-                    else:
-                        try:
-                            input_str = json.dumps(arguments, ensure_ascii=False)
-                        except (TypeError, ValueError):
-                            input_str = str(arguments)
-                    messages.append(
-                        Message(
-                            role="assistant",
-                            text="",
-                            tool_use=({"name": name, "input": input_str},),
-                        )
-                    )
-                elif ptype in ("function_call_output", "local_shell_call_output"):
-                    output = payload.get("output", "")
-                    if not isinstance(output, str):
-                        try:
-                            output = json.dumps(output, ensure_ascii=False)
-                        except (TypeError, ValueError):
-                            output = str(output)
-                    messages.append(
-                        Message(
-                            role="tool",
-                            text="",
-                            tool_result=({"content": output},),
-                        )
-                    )
+                    if _is_system_noise(msg):
+                        continue
+                    key = _dedup_key(msg)
+                    if key in seen_user_texts:
+                        continue
+                    seen_user_texts.add(key)
+                    messages.append(Message(role="user", text=msg))
     except OSError:
         return messages
     return messages
