@@ -43,6 +43,27 @@ Live-validated on a 106-message session: 82 messages with non-empty
 text, 87 with tool calls, 83 with tool results (previously 0/106 —
 old parser read only `message.data`).
 
+## Search behaviour
+
+`search_sessions` (MCP) and `ai-reader search` (CLI) are the public
+search entry points. The MCP tool exposes three knobs that
+backward-compat callers can leave at their defaults:
+
+- `scope="title"` (default) — historical title-substring behaviour.
+- `scope="body"` — full-text search over message text, `tool_use[*].input`
+  and `tool_result[*].content`. Useful for finding references buried in
+  Bash/file invocations. Each candidate session's `read_messages(uuid)`
+  is invoked, so the first run on a large vault can be slow.
+- `scope="all"` — title OR body.
+
+The query string supports bare words, quoted phrases (`"exact phrase"`)
+and Google-style negative prefixes (`-claude` always excludes).
+Operator modes are `AND` (default), `OR`, and `NOT`. When a body
+match is found, the result carries a `snippet` field (up to 200
+chars) so the caller can show "what was found" without a second
+`read_session` round-trip. See [README.md § Search operators](../README.md#search-operators)
+for the full table.
+
 ---
 
 # Adding a new agent parser

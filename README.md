@@ -96,7 +96,7 @@ The MCP server is auto-registered in your agent's config. Tools available:
 |---|---|
 | `list_sessions(agent?)` | List discoverable sessions, optionally filtered by agent. |
 | `read_session(uuid, agent)` | Read one session; returns up to 100 messages. |
-| `search_sessions(query, agent?)` | Case-insensitive title substring search. |
+| `search_sessions(query, agent?, scope?, operator?, limit?)` | Search by title and/or message body, with `AND`/`OR`/`NOT` operators and Google-style `-term` exclusions. See [Search operators](#search-operators). |
 
 ### As a CLI (testing / scripts)
 
@@ -104,9 +104,76 @@ The MCP server is auto-registered in your agent's config. Tools available:
 ai-reader list --agent pi
 ai-reader read --agent pi <session-uuid>
 ai-reader search "refactor"
+ai-reader search "pwa manifest" --scope body --operator and --agent claude
 ```
 
 Add `--json` to any subcommand for machine-readable output.
+
+### Search operators
+
+`search_sessions` (MCP) and `ai-reader search` (CLI) share the same
+query grammar. Default behaviour (`scope="title"`, `operator="AND"`,
+`limit=50`) is unchanged from the previous title-only substring search.
+
+**Query syntax**
+
+| Form | Example | Meaning |
+|---|---|---|
+| Bare words | `pwa manifest` | Both terms (operator controls how). |
+| Quoted phrase | `"exact phrase"` | Single literal term. |
+| Negative prefix | `-claude` | Google-style: this term must NOT appear. |
+
+**Operator modes** (controls how positive terms combine)
+
+| Mode | `pwa manifest` semantics | `pwa -claude` semantics |
+|---|---|---|
+| `AND` (default) | both must appear | `pwa` appears, `claude` does not |
+| `OR` | at least one appears | one of `pwa` appears, `claude` does not |
+| `NOT` | neither appears | neither `pwa` nor `claude` appears |
+
+**Scope modes**
+
+| Scope | Where the search runs |
+|---|---|
+| `title` (default) | `session.title` only — matches the historical title-only behaviour. |
+| `body` | message text + `tool_use[*].input` + `tool_result[*].content` for every session. |
+| `all` | title OR body. |
+
+When `scope` is `body` or `all` and a match is found, the result includes
+a `snippet` field (CLI: printed in the table) — the first matching
+excerpt, up to 200 characters.
+
+**Performance note**: `body` and `all` invoke `read_messages` on every
+candidate session. On large vaults the first run can be slow; raise
+`--limit` to keep the result set bounded while iterating.
+
+**MCP example**
+
+```python
+search_sessions(
+    query='pwa -claude',
+    agent='claude',
+    scope='body',
+    operator='AND',
+    limit=20,
+)
+```
+
+**CLI examples**
+
+```bash
+# title-only (legacy, still default)
+ai-reader search "refactor"
+
+# body search, all terms must appear, exclude claude
+ai-reader search "pwa manifest -claude" --scope body --operator and
+
+# body search, any term, max 5 results
+ai-reader search "pwa OR manifest" --scope body --operator or --limit 5
+
+# everything containing neither of these terms
+ai-reader search "auth login" --scope body --operator not
+```
 
 ### As a Python SDK
 
@@ -214,7 +281,7 @@ pip install -e ".[dev]"
 pytest --cov=src/ai_reader
 ```
 
-- 140 tests, ≥80% coverage required by CI
+- 270 tests, ≥80% coverage required by CI
 - Conventional Commits (`feat:`, `fix:`, `docs:`, …)
 - See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/parsers.md](./docs/parsers.md) for adding new agents
 

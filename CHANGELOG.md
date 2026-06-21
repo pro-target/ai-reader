@@ -6,6 +6,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **MCP `search_sessions`**: extended with `scope`, `operator`, `limit`
+  parameters and a Google-style `-term` negative prefix in the query.
+  The default values (`scope="title"`, `operator="AND"`, `limit=50`)
+  preserve the historical title-substring behaviour, so existing
+  callers are unaffected. New abilities:
+  - `scope="body"` searches message text + `tool_use[*].input` +
+    `tool_result[*].content` across every session.
+  - `scope="all"` searches title OR body.
+  - `operator` accepts `AND` (default), `OR`, or `NOT` for the
+    combination of positive terms. Negative `-term` tokens are
+    always excluded regardless of operator.
+  - Quoted phrases (`"exact phrase"`) are supported via `shlex.split`.
+  - When a `body`/`all` search hits, the result includes a `snippet`
+    field with the first matching excerpt (up to 200 chars).
+- **CLI `ai-reader search`**: mirrors the new parameters as
+  `--scope {title,body,all}` and `--operator {and,or,not}` (alias
+  `--op`). Validation of `--limit` matches the MCP tool. Date
+  filters (`--days`/`--from-date`/`--to-date`) compose with the
+  new flags.
+- **Tests**: 31 new tests (19 MCP + 12 CLI) covering backward-compat,
+  all three operators, the negative prefix, quoted phrases, tool-call
+  matching, snippets, `limit`, and validation error paths. Test
+  count rises from 240 to 270.
+
 ### Changed
 
 - **claude**: `extract_title()` now uses the **first** user message instead
