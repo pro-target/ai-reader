@@ -139,7 +139,15 @@ if [[ "$USE_VENV" == "1" ]]; then
     VENV_MCP_BIN="$VENV_DIR/bin/ai-reader-mcp"
     PIP_TARGET="$VENV_DIR/bin/pip"
 else
-    PIP_TARGET="$PYTHON -m pip"
+    if "$PYTHON" -m pip --version >/dev/null 2>&1; then
+        PIP_TARGET="$PYTHON -m pip"
+    elif command -v pip3 >/dev/null 2>&1 && pip3 --version >/dev/null 2>&1; then
+        PIP_TARGET="$(command -v pip3)"
+    elif command -v pip >/dev/null 2>&1 && pip --version >/dev/null 2>&1; then
+        PIP_TARGET="$(command -v pip)"
+    else
+        die "pip not found. Install python3-venv (preferred) or python3-pip, then rerun install.sh"
+    fi
     if [[ "$USE_SUDO" == "1" ]]; then
         VENV_PYTHON_BIN="/usr/local/bin/ai-reader"
         VENV_MCP_BIN="/usr/local/bin/ai-reader-mcp"

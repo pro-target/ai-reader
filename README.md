@@ -36,6 +36,9 @@ cannot:
 
 ## Quick Start (1 request)
 
+Prerequisite: Python 3.11+ with either `venv` (`python3-venv`) or `pip`
+(`python3-pip`/`pip3`) available.
+
 ```bash
 git clone https://github.com/pro-target/ai-reader.git ~/dev/ai-reader
 cd ~/dev/ai-reader && bash install.sh
