@@ -23,7 +23,12 @@ if str(_SRC) not in sys.path:
 from ai_reader import __version__  # noqa: E402
 from ai_reader.agents import _detect_agent_with_source  # noqa: E402
 from ai_reader.parsers import AgentName, Session  # noqa: E402
-from ai_reader.parsers import antigravity, claude, codex, opencode, pi  # noqa: E402
+from ai_reader.parsers import (  # noqa: E402
+    PARSERS as _PARSERS,
+    coerce_agent as _coerce_agent,
+    iso as _iso,
+    target_agents as _target_agents,
+)
 from ai_reader.session import (  # noqa: E402
     AmbiguousSessionError,
     SessionCandidate,
@@ -31,15 +36,6 @@ from ai_reader.session import (  # noqa: E402
 )
 
 __all__ = ["main", "build_parser"]
-
-
-_PARSERS = {
-    AgentName.CLAUDE: claude,
-    AgentName.CODEX: codex,
-    AgentName.OPENCODE: opencode,
-    AgentName.ANTIGRAVITY: antigravity,
-    AgentName.PI: pi,
-}
 
 
 _AGENT_CHOICES = tuple(a.value.lower() for a in _PARSERS.keys())
@@ -51,35 +47,12 @@ _UUID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 _TABLE_COLUMNS = ("uuid", "agent", "date", "title", "messages")
 
 
-def _coerce_agent(name: str) -> AgentName:
-    """Map a lowercase agent name to :class:`AgentName`."""
-    key = (name or "").strip().lower()
-    for agent_name in _PARSERS:
-        if agent_name.value.lower() == key:
-            return agent_name
-    raise ValueError(
-        f"unknown agent {name!r}; expected one of {sorted(_AGENT_CHOICES)}"
-    )
-
-
-def _target_agents(agent: Optional[str]) -> List[AgentName]:
-    if agent is None or not str(agent).strip():
-        return list(_PARSERS.keys())
-    return [_coerce_agent(agent)]
-
-
 def _validate_uuid(value: str) -> str:
     if not value or not _UUID_PATTERN.match(value):
         raise ValueError(
             f"invalid uuid {value!r}: must be 1-128 chars of [A-Za-z0-9_.-]"
         )
     return value
-
-
-def _iso(date: datetime) -> str:
-    if date.tzinfo is None:
-        return date.isoformat() + "Z"
-    return date.isoformat()
 
 
 def _parse_date(value: str, field: str) -> datetime:

@@ -57,10 +57,22 @@ __all__ = [
     "pi",
     "find_sessions",
     "read_session",
+    # Canonical cross-agent registry + helpers (re-exported by
+    # ``ai_reader.find_file_edits`` and used by ``ai_reader.cli`` /
+    # ``ai_reader.mcp_server``).  These are the SINGLE source of truth;
+    # the legacy private aliases below delegate to them.
+    "PARSERS",
+    "coerce_agent",
+    "target_agents",
+    "iso",
 ]
 
 
-_PARSERS: Dict[AgentName, object] = {
+# Canonical agent registry — the single source of truth for the mapping
+# between :class:`AgentName` values and their parser modules.  Both
+# ``ai_reader.find_file_edits`` and ``ai_reader.cli`` import this dict
+# (and the helpers below) rather than keeping their own copies.
+PARSERS: Dict[AgentName, object] = {
     AgentName.CLAUDE: claude,
     AgentName.CODEX: codex,
     AgentName.OPENCODE: opencode,
@@ -69,10 +81,37 @@ _PARSERS: Dict[AgentName, object] = {
 }
 
 
-def _iso(date: datetime) -> str:
+def coerce_agent(name: str) -> AgentName:
+    """Map a lowercase agent name to :class:`AgentName`."""
+    key = (name or "").strip().lower()
+    for agent_name in PARSERS:
+        if agent_name.value.lower() == key:
+            return agent_name
+    raise ValueError(
+        f"unknown agent {name!r}; expected one of "
+        f"{sorted(a.value.lower() for a in PARSERS)}"
+    )
+
+
+def target_agents(agent: Optional[str]) -> List[AgentName]:
+    """Resolve the optional ``agent`` filter to a list of :class:`AgentName`."""
+    if agent is None or not str(agent).strip():
+        return list(PARSERS.keys())
+    return [coerce_agent(agent)]
+
+
+def iso(date: datetime) -> str:
+    """Format a datetime as ISO-8601 with UTC fallback."""
     if date.tzinfo is None:
         return date.isoformat() + "Z"
     return date.isoformat()
+
+
+# Legacy private aliases kept so the in-package dispatchers below can keep
+# their historical names without churn; they delegate to the canonical
+# implementations above.
+_PARSERS = PARSERS
+_iso = iso
 
 
 def _candidate(session: Session) -> dict:
@@ -85,17 +124,7 @@ def _candidate(session: Session) -> dict:
     }
 
 
-def _target_agents(agent: Optional[str]) -> List[AgentName]:
-    if agent is None or not str(agent).strip():
-        return list(_PARSERS.keys())
-    key = str(agent).strip().lower()
-    for agent_name in _PARSERS:
-        if agent_name.value.lower() == key:
-            return [agent_name]
-    raise ValueError(
-        f"unknown agent {agent!r}; expected one of "
-        f"{sorted(a.value.lower() for a in _PARSERS)}"
-    )
+_target_agents = target_agents
 
 
 def find_sessions(query: str, agent: Optional[str] = None) -> List[dict]:

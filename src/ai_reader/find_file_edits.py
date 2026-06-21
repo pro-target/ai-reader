@@ -20,12 +20,20 @@ import json
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Sequence
 
-from ai_reader.parsers import AgentName
-from ai_reader.parsers import antigravity, claude, codex, opencode, pi
+from ai_reader.parsers import (
+    PARSERS,
+    coerce_agent,
+    iso,
+    target_agents,
+)
 
 __all__ = [
     "EDIT_TOOLS",
     "EDIT_PATH_KEYS",
+    # ``PARSERS``, ``coerce_agent``, ``target_agents`` and ``iso`` are
+    # re-exported from :mod:`ai_reader.parsers` (the canonical source of
+    # truth) so downstream consumers and tests that historically imported
+    # them from here keep working.
     "PARSERS",
     "coerce_agent",
     "target_agents",
@@ -48,49 +56,6 @@ EDIT_TOOLS: frozenset[str] = frozenset({
 
 
 EDIT_PATH_KEYS: tuple[str, ...] = ("file_path", "notebook_path", "path")
-
-
-PARSERS = {
-    AgentName.CLAUDE: claude,
-    AgentName.CODEX: codex,
-    AgentName.OPENCODE: opencode,
-    AgentName.ANTIGRAVITY: antigravity,
-    AgentName.PI: pi,
-}
-
-
-_AGENT_NAMES_LOWER: dict[str, AgentName] = {
-    "claude": AgentName.CLAUDE,
-    "codex": AgentName.CODEX,
-    "opencode": AgentName.OPENCODE,
-    "antigravity": AgentName.ANTIGRAVITY,
-    "pi": AgentName.PI,
-}
-
-
-def coerce_agent(name: str) -> AgentName:
-    """Map a lowercase agent name to :class:`AgentName`."""
-    key = (name or "").strip().lower()
-    if key not in _AGENT_NAMES_LOWER:
-        raise ValueError(
-            f"unknown agent {name!r}; expected one of "
-            f"{sorted(_AGENT_NAMES_LOWER)}"
-        )
-    return _AGENT_NAMES_LOWER[key]
-
-
-def target_agents(agent: Optional[str]) -> List[AgentName]:
-    """Resolve the optional ``agent`` filter to a list of :class:`AgentName`."""
-    if agent is None or not str(agent).strip():
-        return list(PARSERS.keys())
-    return [coerce_agent(agent)]
-
-
-def iso(date: datetime) -> str:
-    """Format a datetime as ISO-8601 with UTC fallback."""
-    if date.tzinfo is None:
-        return date.replace(tzinfo=None).isoformat() + "Z"
-    return date.isoformat()
 
 
 def parse_iso_bound(value: Optional[str], name: str) -> Optional[datetime]:
