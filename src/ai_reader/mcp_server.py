@@ -249,6 +249,11 @@ def read_session(
     parser = _PARSERS[agent_name]
     try:
         session = parser.read_session(uuid)
+    except ValueError as exc:
+        # Parsers reject malformed uuids (path separators, whitespace, …)
+        # with ValueError; surface them as structured invalid_argument
+        # instead of letting them propagate as an uncaught server error.
+        return {"error": "invalid_argument", "message": str(exc)}
     except FileNotFoundError:
         return {
             "error": "not_found",
