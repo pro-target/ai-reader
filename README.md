@@ -44,7 +44,7 @@ cd ~/dev/ai-reader && bash install.sh
 That's it. The installer:
 - Detects install mode (system-wide with sudo, or per-user without)
 - Creates a venv, installs the package
-- Prints MCP config snippets for **Claude**, **Codex**, **OpenCode**, **Antigravity**
+- Patches MCP configs for **Claude**, **Codex**, **OpenCode**, **Antigravity** when those config files exist
 - Runs smoke tests
 
 ## Supported Agents
@@ -197,6 +197,7 @@ and the env key is `"environment"`.
 ### Notes
 
 - `ai-reader-mcp` must be on `PATH`, or use the absolute path as above.
+- JSON config patching uses `jq`; if `jq` is missing, install still completes and prints the MCP command to register manually.
 - Restart the host tool after editing its config file.
 - The server is read-only; any caller that can reach it can read any
   session. See [Design boundaries](#design-boundaries).
