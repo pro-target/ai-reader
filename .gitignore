@@ -46,3 +46,6 @@ data/
 
 # Agent-local memory (serena, etc.) — not for repo
 .serena/
+
+# Internal working/audit notes — private, not for public repo
+_docs/
