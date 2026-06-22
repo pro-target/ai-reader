@@ -49,3 +49,8 @@ data/
 
 # Internal working/audit notes — private, not for public repo
 _docs/
+
+# Node/npm artifacts (repo is Python; npm only used by throwaway scaffolds)
+package-lock.json
+node_modules/
+/extensions/

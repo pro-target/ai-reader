@@ -1698,6 +1698,88 @@ def test_find_file_edits_codex_unknown_tool_skipped(
     assert result["count"] == 0
 
 
+def test_find_file_edits_codex_exec_command_redirect(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex CLI ``exec_command`` writing via ``>`` surfaces as an edit hit."""
+    _write_codex_edit_session(
+        tmp_sessions_dir, "cxf-4",
+        user_text="Write the module via shell",
+        tool_name="exec_command",
+        arguments={"cmd": "printf 'x = 1\\n' > /tmp/codex-sh/app.py"},
+    )
+    base = str(tmp_sessions_dir / ".codex" / "sessions")
+    monkeypatch.setattr(
+        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
+    )
+    result = find_file_edits(path="codex-sh", agent="codex")
+    assert result["count"] == 1
+    hit = result["records"][0]
+    assert hit["agent"] == "codex"
+    assert hit["tool"] == "exec_command"
+    assert hit["file"] == "/tmp/codex-sh/app.py"
+    assert hit["input"]["edit"] == "write"
+    assert "printf" in hit["input"]["cmd"]
+
+
+def test_find_file_edits_codex_exec_command_append(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``>>`` is classified as an append edit."""
+    _write_codex_edit_session(
+        tmp_sessions_dir, "cxf-5",
+        user_text="Append to the log",
+        tool_name="exec_command",
+        arguments={"cmd": "echo bumped >> /tmp/codex-sh2/log.txt"},
+    )
+    base = str(tmp_sessions_dir / ".codex" / "sessions")
+    monkeypatch.setattr(
+        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
+    )
+    result = find_file_edits(path="codex-sh2", agent="codex")
+    assert result["count"] == 1
+    assert result["records"][0]["file"] == "/tmp/codex-sh2/log.txt"
+    assert result["records"][0]["input"]["edit"] == "append"
+
+
+def test_find_file_edits_codex_exec_command_multi_redirect(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One ``exec_command`` writing two files yields two records."""
+    _write_codex_edit_session(
+        tmp_sessions_dir, "cxf-6",
+        user_text="Write two files",
+        tool_name="exec_command",
+        arguments={"cmd": "echo a > /tmp/codex-sh3/a.txt && echo b > /tmp/codex-sh3/b.txt"},
+    )
+    base = str(tmp_sessions_dir / ".codex" / "sessions")
+    monkeypatch.setattr(
+        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
+    )
+    result = find_file_edits(path="codex-sh3", agent="codex")
+    files = sorted(r["file"] for r in result["records"])
+    assert result["count"] == 2
+    assert files == ["/tmp/codex-sh3/a.txt", "/tmp/codex-sh3/b.txt"]
+
+
+def test_find_file_edits_codex_exec_command_quoted_gt_ignored(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``>`` inside quotes (regex/grep pattern) is NOT a redirection."""
+    _write_codex_edit_session(
+        tmp_sessions_dir, "cxf-7",
+        user_text="Scan the headings",
+        tool_name="exec_command",
+        arguments={"cmd": 'rg "<h[^>]*>" /tmp/codex-sh4/page.html'},
+    )
+    base = str(tmp_sessions_dir / ".codex" / "sessions")
+    monkeypatch.setattr(
+        "ai_reader.parsers.codex._resolve_base_dir", lambda bd=None: [Path(base)]
+    )
+    result = find_file_edits(path="codex-sh4", agent="codex")
+    assert result["count"] == 0
+
+
 # ---------------------------------------------------------------------------
 # find_file_edits — antigravity tool_use
 # ---------------------------------------------------------------------------

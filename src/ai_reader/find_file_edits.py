@@ -58,6 +58,13 @@ EDIT_TOOLS: frozenset[str] = frozenset({
 EDIT_PATH_KEYS: tuple[str, ...] = ("file_path", "notebook_path", "path")
 
 
+# Codex CLI routes file writes through a shell-exec tool (``exec_command`` /
+# ``local_shell_call``) instead of a structured edit tool, so the target path
+# lives inside the shell command string. These tool names trigger a
+# conservative quote-aware redirection scan (see :func:`_shell_redirect_targets`).
+_SHELL_EXEC_TOOLS: frozenset[str] = frozenset({"exec_command", "local_shell_call"})
+
+
 def parse_iso_bound(value: Optional[str], name: str) -> Optional[datetime]:
     """Parse an ISO 8601 bound string for the ``find_file_edits`` filter.
 
@@ -124,6 +131,91 @@ def edit_path_from_input(payload: object) -> Optional[str]:
     return None
 
 
+def _extract_shell_command(raw_input: object) -> str:
+    """Best-effort recovery of the command string from a shell-exec tool input.
+
+    Handles the dict shapes codex ``exec_command`` / ``local_shell_call`` use
+    (``cmd`` / ``command`` / ``args`` / ``argv``; ``command``/``args`` may be
+    an argv list joined into one line) and bare strings. Returns ``""`` when
+    no command can be recovered.
+    """
+    payload: object = raw_input
+    if isinstance(raw_input, str) and raw_input.strip():
+        try:
+            payload = json.loads(raw_input)
+        except (ValueError, TypeError):
+            return raw_input
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("cmd", "command", "args", "argv"):
+            val = payload.get(key)
+            if isinstance(val, str) and val:
+                return val
+            if isinstance(val, list) and val:
+                return " ".join(str(v) for v in val)
+    return ""
+
+
+def _shell_redirect_targets(cmd: str) -> list[tuple[str, bool]]:
+    """Return ``(path, is_append)`` for file-write redirections in a shell cmd.
+
+    Quote-aware: ``>`` inside single/double quotes — e.g. regex or grep
+    patterns like ``"<h[^>]*>"`` — is ignored. Only stdout redirections
+    count (``>`` / ``>>`` / ``&>`` / ``&>>``); numeric fd redirects
+    (``2>`` / ``1>``) and arrows inside words (``->`` / ``=>``) are skipped.
+
+    Conservative by design: ``find_file_edits`` is an audit tool, so false
+    negatives are preferred over false positives. Writes via ``tee`` /
+    ``sed -i`` / ``cp`` / ``mv`` / heredoc-only are NOT detected (documented
+    limitation) — the common codex pattern ``printf '...' > path`` is.
+    """
+    targets: list[tuple[str, bool]] = []
+    i, n = 0, len(cmd)
+    in_s = in_d = False
+    # A redirection is suppressed when the char before the '>' looks like a
+    # fd marker (``2>``), a chained '>' (``>>`` handled separately), or an
+    # in-word arrow (``->`` / ``=>`` / ``:>`` / path sep).
+    skip_prev = set("0123456789>-=:/")
+    stops = set(" \t\n;|&<>()'\"")
+    while i < n:
+        c = cmd[i]
+        if not in_d and c == "'":
+            in_s = not in_s
+            i += 1
+            continue
+        if not in_s and c == '"':
+            in_d = not in_d
+            i += 1
+            continue
+        if in_s or in_d:
+            i += 1
+            continue
+        is_amp = c == "&" and i + 1 < n and cmd[i + 1] == ">"
+        if c == ">" or is_amp:
+            op_start = i
+            gt = i + 1 if is_amp else i  # index of the '>' itself
+            prev = cmd[op_start - 1] if op_start > 0 else ""
+            append = gt + 1 < n and cmd[gt + 1] == ">"
+            last = gt + 1 if append else gt
+            if prev in skip_prev:
+                i = last + 1
+                continue
+            k = last + 1
+            while k < n and cmd[k] in " \t":
+                k += 1
+            start = k
+            while k < n and cmd[k] not in stops:
+                k += 1
+            path = cmd[start:k].strip()
+            if path and not path.startswith("&"):
+                targets.append((path, append))
+            i = k
+            continue
+        i += 1
+    return targets
+
+
 def previous_user_intent(
     messages: Sequence[Any], index: int
 ) -> Optional[str]:
@@ -167,6 +259,12 @@ def find_file_edits(
     Raises:
         ValueError: on invalid arguments (``path`` empty, ``limit`` negative,
             unparseable ``since``/``until``, unknown ``agent``).
+
+    Codex CLI note: codex writes files through a shell-exec tool
+    (``exec_command`` / ``local_shell_call``), so the target path is recovered
+    from the command string via a conservative redirection scan
+    (:func:`_shell_redirect_targets`). One such tool call can yield several
+    records when it writes multiple files (``a > f1 && b > f2``).
     """
     if not isinstance(path, str) or not path:
         raise ValueError("path must be a non-empty string")
@@ -204,7 +302,8 @@ def find_file_edits(
                     if not isinstance(tool, dict):
                         continue
                     name = tool.get("name", "")
-                    if name not in EDIT_TOOLS:
+                    is_shell = name in _SHELL_EXEC_TOOLS
+                    if name not in EDIT_TOOLS and not is_shell:
                         continue
                     tool_ts: Optional[datetime] = to_utc_aware(tool.get("timestamp"))
                     edit_ts: Optional[datetime] = (
@@ -220,29 +319,47 @@ def find_file_edits(
                         edit_ts is None or edit_ts > until_dt
                     ):
                         continue
-                    raw_input = tool.get("input", "")
-                    payload: object = raw_input
-                    if isinstance(raw_input, str) and raw_input.strip():
-                        try:
-                            payload = json.loads(raw_input)
-                        except (ValueError, TypeError):
-                            payload = raw_input
-                    file_path = edit_path_from_input(payload)
-                    if file_path is None or path not in file_path:
-                        continue
-                    records.append({
-                        "agent": agent_name.value.lower(),
-                        "session_uuid": session.uuid,
-                        "session_title": session_title,
-                        "session_date": session_iso,
-                        "message_index": idx,
-                        "timestamp": iso(edit_ts) if edit_ts is not None else None,
-                        "tool": name,
-                        "file": file_path,
-                        "intent": intent,
-                        "assistant": msg.text or "",
-                        "input": payload if isinstance(payload, dict) else {},
-                    })
+                    # Build (file, input, tool) candidates for this call.
+                    # Structured edit tools yield one; shell-exec tools may
+                    # yield several (one per redirected file path).
+                    if is_shell:
+                        cmd = _extract_shell_command(tool.get("input", ""))
+                        candidates: List[tuple[str, dict[str, Any], str]] = [
+                            (fpath, {"cmd": cmd, "edit": "append" if append else "write"}, name)
+                            for fpath, append in _shell_redirect_targets(cmd)
+                            if path in fpath
+                        ]
+                    else:
+                        raw_input = tool.get("input", "")
+                        payload: object = raw_input
+                        if isinstance(raw_input, str) and raw_input.strip():
+                            try:
+                                payload = json.loads(raw_input)
+                            except (ValueError, TypeError):
+                                payload = raw_input
+                        file_path = edit_path_from_input(payload)
+                        if file_path is None or path not in file_path:
+                            candidates = []
+                        else:
+                            candidates = [(
+                                file_path,
+                                payload if isinstance(payload, dict) else {},
+                                name,
+                            )]
+                    for file_path, input_obj, tool_label in candidates:
+                        records.append({
+                            "agent": agent_name.value.lower(),
+                            "session_uuid": session.uuid,
+                            "session_title": session_title,
+                            "session_date": session_iso,
+                            "message_index": idx,
+                            "timestamp": iso(edit_ts) if edit_ts is not None else None,
+                            "tool": tool_label,
+                            "file": file_path,
+                            "intent": intent,
+                            "assistant": msg.text or "",
+                            "input": input_obj,
+                        })
 
     records.sort(key=lambda r: (r["timestamp"] is None, r["timestamp"] or ""))
     total = len(records)

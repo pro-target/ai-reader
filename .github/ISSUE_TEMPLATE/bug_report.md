@@ -37,10 +37,11 @@ paste error here
 - OS: (Ubuntu 22.04 / macOS 14 / …)
 - Agent(s) involved: (claude / codex / opencode / antigravity / all)
 
-## Guard state
+## Diagnostics
 
-- Were you running as parent or sub-agent? (env vars set?)
+- Agent(s) whose sessions you were reading: (claude / codex / opencode / antigravity / pi / all)
 - Output of `ai-reader list --agent <name> --json` if relevant.
+- If a specific call failed, the `uuid` and the exact MCP/CLI call.
 
 ## Logs / context
 

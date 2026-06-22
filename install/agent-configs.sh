@@ -2,6 +2,11 @@
 # Patch MCP configs for 4 agents to add ai-reader entry.
 # Idempotent: re-running does not duplicate entries.
 #
+# Why 4, not 5: Pi (@earendil-works/pi-coding-agent) has no MCP-server host
+# config to patch — it uses an extension/skill model, not an mcpServers file.
+# Pi sessions are still readable BY ai-reader via CLI/SDK; they just cannot
+# host ai-reader-mcp as an in-process MCP tool. See install/README.md.
+#
 # Environment variables:
 #   AI_READER_CMD  path to ai-reader-mcp entry point (default: ~/.local/bin/ai-reader-mcp)
 #

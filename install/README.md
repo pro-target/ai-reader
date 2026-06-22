@@ -3,6 +3,13 @@
 `ai-reader` ships with an idempotent installer. It works in three modes and
 patches the four agent configs (Claude, Codex, OpenCode, Antigravity) in place.
 
+**Pi is intentionally not auto-registered.** Pi (`@earendil-works/pi-coding-agent`)
+has no MCP-server host config — it uses an extension/skill model, not an
+`mcpServers` file the installer could patch. Pi sessions are still fully
+readable *by* `ai-reader` (via the CLI or Python SDK); they just cannot host
+`ai-reader-mcp` as an in-process MCP tool. See
+[Pi — no MCP host](#pi--no-mcp-host) below.
+
 ## Quick start
 
 ```bash
@@ -48,6 +55,16 @@ each installed agent. Existing entries are preserved untouched.
 
 Re-running `bash install.sh` is safe — already-present entries are detected
 and skipped.
+
+### Pi — no MCP host
+
+Pi is absent from the table above on purpose. As of Pi v0.79.x there is no
+MCP config file (`~/.pi/agent/settings.json` holds only UI/theme keys; the
+`pi` binary exposes an extension/skill system, not an `mcpServers` map).
+The installer therefore has nothing to patch for Pi. To use `ai-reader` from
+a Pi session, call the CLI directly (`ai-reader list`, `ai-reader read …`) or
+the Python SDK — both work regardless of host, because they read the session
+files on disk.
 
 ## Verify
 
@@ -98,6 +115,6 @@ detects existing entries and reuses the venv.
 | Path                          | Purpose                                              |
 |-------------------------------|------------------------------------------------------|
 | `install.sh`                  | Main installer                                       |
-| `install/agent-configs.sh`    | Patches 4 agent MCP configs (called by install.sh)  |
+| `install/agent-configs.sh`    | Patches 4 agent MCP configs (Pi excluded — no MCP host; see above)  |
 | `install/README.md`           | This file                                            |
 | `uninstall.sh`                | Reverse of install                                   |

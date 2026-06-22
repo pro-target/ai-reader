@@ -44,8 +44,11 @@ Thin wrapper over the parsers. Exits with distinct codes:
 - `3` — `FileNotFoundError` (session missing)
 
 ### `ai-reader-mcp` (MCP server)
-Stdio JSON-RPC. Three tools: `list_sessions`, `read_session`,
-`search_sessions`. Errors are returned as dicts (MCP prefers
+Stdio JSON-RPC. Four tools: `list_sessions`, `read_session`,
+`search_sessions`, and `find_file_edits`. `list_sessions` and
+`read_session` are paginated (`limit`/`offset`, `limit=0` = uncapped)
+and report a `truncated` flag when more pages remain. Errors are
+returned as dicts (MCP prefers
 structured errors to raised exceptions); a missing session returns
 `{"error": "not_found", ...}`, an unknown agent or invalid argument
 returns `{"error": "invalid_argument", ...}`.

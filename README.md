@@ -99,6 +99,7 @@ Session content is **untrusted** — a reader's caller (auditor, summarizer, rep
 ## Known limitations
 
 - **Antigravity** — fixture coverage plus optional real-data smoke tests when a local brain directory exists.
+- **Codex CLI shell edits** — `find_file_edits` recovers codex file writes from `exec_command` / `local_shell_call` shell commands via a conservative quote-aware redirection scan (`>` / `>>`). Writes done through `tee` / `sed -i` / `cp` / `mv` / heredoc-only are not detected; structured edits (`apply_patch` / `write_file`) always are.
 
 See [docs/parsers.md](docs/parsers.md) for the full parser-coverage matrix.
 
@@ -110,10 +111,12 @@ The MCP server is auto-registered in your agent's config. Tools available:
 
 | Tool | Purpose |
 |---|---|
-| `list_sessions(agent?)` | List discoverable sessions, optionally filtered by agent. |
-| `read_session(uuid, agent)` | Read one session; returns up to 100 messages. |
+| `list_sessions(agent?, limit?, offset?)` | List discoverable sessions, optionally filtered by agent. Paginated: `limit=0` = uncapped; response carries `total`/`offset`/`limit`/`truncated`. |
+| `read_session(uuid, agent, offset?, limit?)` | Read one session; returns up to 100 messages by default. Pass `offset`/`limit` to page further. |
 | `find_file_edits(path, agent?, since?, until?, limit?)` | Find every file edit across sessions for a given path, cross-agent by default, optionally time-boxed (`since`/`until` ISO 8601). |
 | `search_sessions(query, agent?, scope?, operator?, limit?)` | Search by title and/or message body, with `AND`/`OR`/`NOT` operators and Google-style `-term` exclusions. See [Search operators](#search-operators). |
+
+**Pagination** (`limit`/`offset`, plus a `truncated` flag when more pages remain) is exposed on the MCP tools and the Python SDK — see [architecture.md](docs/architecture.md).
 
 ### As a CLI (testing / scripts)
 
@@ -293,6 +296,32 @@ and the env key is `"environment"`.
 }
 ```
 
+### Antigravity
+
+Edit `~/.gemini/antigravity/mcp_config.json` (`mcpServers` object). This is
+distinct from the Gemini CLI config above — Antigravity keeps its MCP config
+under `~/.gemini/antigravity/`.
+
+```json
+{
+  "mcpServers": {
+    "ai-reader": {
+      "command": "/home/USER/.local/bin/ai-reader-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+### Pi — no MCP host
+
+Pi (`@earendil-works/pi-coding-agent`) has **no MCP-server config** to edit.
+It uses an extension/skill model (`pi install <source>`, `pi config`), not an
+`mcpServers` map, so `ai-reader-mcp` cannot be registered as an in-process
+MCP tool inside Pi. Pi sessions are still fully readable *by* `ai-reader` —
+call the CLI (`ai-reader list --agent pi`, `ai-reader read …`) or the Python
+SDK from a Pi session. Both read the `~/.pi/agent/sessions/` files directly.
+
 ### Notes
 
 - `ai-reader-mcp` must be on `PATH`, or use the absolute path as above.
@@ -310,7 +339,7 @@ pip install -e ".[dev]"
 pytest --cov=src/ai_reader
 ```
 
-- 345 tests, ≥80% coverage required by CI
+- 350+ tests, ≥80% coverage required by CI
 - Conventional Commits (`feat:`, `fix:`, `docs:`, …)
 - See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/parsers.md](./docs/parsers.md) for adding new agents
 

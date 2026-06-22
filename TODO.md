@@ -1,8 +1,8 @@
 # TODO — ai-reader (as of 2026-06-22, updated after session d7f4db03)
 
-Read `_docs/handoff/2026-06-21_session-end.md` first for full context
-(8-PR session). The addendum at the bottom of that file covers the
-follow-up git-audit session `13163330`.
+Open work items for the next session. Historical context for the 8-PR
+session and the follow-up git-audit (`13163330`) lives in local handoff
+notes (private, not tracked in this public repo).
 
 ## NOW (do before anything else next session)
 

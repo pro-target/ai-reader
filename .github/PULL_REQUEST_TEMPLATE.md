@@ -35,8 +35,9 @@
 
 ## Security considerations
 
-<!-- Does this PR touch the access guard, parsers that read untrusted data, or
-anywhere a malicious session file could affect the host? If so, describe. -->
+<!-- Does this PR touch parsers that read untrusted session data, or anywhere
+a malicious session file could affect the host (path resolution, file I/O,
+/tmp handling)? If so, describe. See docs/security.md for the trust boundary. -->
 
 ## Screenshots / output
 
