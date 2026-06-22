@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Patch MCP configs for 4 agents to add ai-reader entry.
+# Patch MCP configs for 4 agents + install a CLI skill for Pi.
 # Idempotent: re-running does not duplicate entries.
 #
-# Why 4, not 5: Pi (@earendil-works/pi-coding-agent) has no MCP-server host
-# config to patch — it uses an extension/skill model, not an mcpServers file.
-# Pi sessions are still readable BY ai-reader via CLI/SDK; they just cannot
-# host ai-reader-mcp as an in-process MCP tool. See install/README.md.
+# Why Pi is different: Pi (@earendil-works/pi-coding-agent) has no MCP-server
+# host config to patch — it uses an extension/skill model, not an mcpServers
+# file. So instead of an MCP entry, patch_pi() drops an ai-reader skill into
+# ~/.agents/skills/ai-reader/ (Pi reads that dir). No MCP host, no spawn —
+# the skill just teaches the model to call the read-only `ai-reader` CLI.
+# Pi sessions are also readable BY ai-reader via CLI/SDK. See install/README.md.
 #
 # Environment variables:
 #   AI_READER_CMD  path to ai-reader-mcp entry point (default: ~/.local/bin/ai-reader-mcp)
@@ -169,8 +171,35 @@ patch_antigravity() {
     log "Antigravity: added mcpServers.ai-reader"
 }
 
+# --- Pi (skill, not MCP — Pi has no mcpServers host config) ---
+# Pi cannot host ai-reader-mcp as an in-process MCP tool (design contract).
+# Instead we drop a read-only CLI skill into the shared skills dir that Pi
+# already reads; the model then calls `ai-reader` via bash. No spawn, no MCP.
+patch_pi() {
+    # Cleanup: dangling symlink left by the abandoned in-process MCP extension.
+    local old_ext="$HOME/.pi/agent/extensions/ai-reader"
+    if [[ -L "$old_ext" && ! -e "$old_ext" ]]; then
+        rm "$old_ext"
+        warn "Pi:       removed dangling extension symlink $old_ext"
+    fi
+
+    local dest="$HOME/.agents/skills/ai-reader/SKILL.md"
+    local src="$REPO_DIR/install/pi/skills/ai-reader/SKILL.md"
+    if [[ ! -f "$src" ]]; then
+        warn "Pi:       skill source missing: $src (skipping)"
+        return 0
+    fi
+    if [[ -f "$dest" ]]; then
+        log "Pi:       skill already installed (~/.agents/skills/ai-reader/)"
+        return 0
+    fi
+    mkdir -p "$(dirname "$dest")"
+    cp "$src" "$dest"
+    log "Pi:       installed skill → ~/.agents/skills/ai-reader/SKILL.md"
+}
+
 # --- entrypoint ---
-hdr="==> patching 4 agent MCP configs"
+hdr="==> patching 4 agent MCP configs + Pi skill"
 printf "\n%s\n" "$hdr"
 
 # Pre-flight: jq is required for Claude + Antigravity patches
@@ -183,5 +212,6 @@ patch_claude
 patch_codex
 patch_opencode
 patch_antigravity
+patch_pi
 
 log "agent-configs.sh: done"

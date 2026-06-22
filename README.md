@@ -313,14 +313,20 @@ under `~/.gemini/antigravity/`.
 }
 ```
 
-### Pi — no MCP host
+### Pi — skill, not MCP
 
 Pi (`@earendil-works/pi-coding-agent`) has **no MCP-server config** to edit.
 It uses an extension/skill model (`pi install <source>`, `pi config`), not an
 `mcpServers` map, so `ai-reader-mcp` cannot be registered as an in-process
-MCP tool inside Pi. Pi sessions are still fully readable *by* `ai-reader` —
-call the CLI (`ai-reader list --agent pi`, `ai-reader read …`) or the Python
-SDK from a Pi session. Both read the `~/.pi/agent/sessions/` files directly.
+MCP tool inside Pi (and spawning it in-process would violate Pi's design
+contract). Instead, `install/agent-configs.sh` drops a read-only **CLI skill**
+into `~/.agents/skills/ai-reader/` — a directory Pi already scans. The skill
+teaches the model to call the `ai-reader` CLI from a Pi bash session, with no
+MCP spawn involved. Pi sessions are also fully readable *by* `ai-reader` via
+the CLI (`ai-reader list --agent pi`, `ai-reader read …`) or the Python SDK;
+both read the `~/.pi/agent/sessions/` files directly. For a `/ai-reader` slash
+command, set `enableSkillCommands: true` in `~/.pi/agent/settings.json` (the
+skill's text works even with the default `false`).
 
 ### Notes
 

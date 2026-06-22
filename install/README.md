@@ -52,19 +52,23 @@ each installed agent. Existing entries are preserved untouched.
 | Codex       | `~/.codex/config.toml`                         | TOML   | `[mcp_servers.ai-reader]` |
 | OpenCode    | `~/.config/opencode/opencode.jsonc`            | JSONC  | `mcp["ai-reader"]`        |
 | Antigravity | `~/.gemini/antigravity/mcp_config.json`        | JSON   | `mcpServers["ai-reader"]` |
+| Pi          | `~/.agents/skills/ai-reader/SKILL.md`          | skill  | CLI skill (no MCP host)   |
 
 Re-running `bash install.sh` is safe — already-present entries are detected
 and skipped.
 
-### Pi — no MCP host
+### Pi — skill, not MCP
 
-Pi is absent from the table above on purpose. As of Pi v0.79.x there is no
-MCP config file (`~/.pi/agent/settings.json` holds only UI/theme keys; the
-`pi` binary exposes an extension/skill system, not an `mcpServers` map).
-The installer therefore has nothing to patch for Pi. To use `ai-reader` from
-a Pi session, call the CLI directly (`ai-reader list`, `ai-reader read …`) or
-the Python SDK — both work regardless of host, because they read the session
-files on disk.
+Pi is special. As of Pi v0.79.x there is no MCP config file
+(`~/.pi/agent/settings.json` holds only UI/theme keys; the `pi` binary exposes
+an extension/skill system, not an `mcpServers` map), so `ai-reader-mcp` cannot
+be registered as an in-process MCP tool. Instead the installer drops a
+read-only **CLI skill** at `~/.agents/skills/ai-reader/SKILL.md` — a directory
+Pi already scans. The skill teaches the model to call the `ai-reader` CLI from
+a Pi bash session (no MCP spawn, no design-contract violation). You can also
+call the CLI directly (`ai-reader list`, `ai-reader read …`) or the Python SDK
+— both read the session files on disk. For a `/ai-reader` slash command, set
+`enableSkillCommands: true` in `~/.pi/agent/settings.json`.
 
 ## Verify
 
