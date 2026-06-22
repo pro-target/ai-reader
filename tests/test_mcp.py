@@ -93,17 +93,23 @@ def test_mcp_tool_registration() -> None:
 
 
 def test_mcp_list_sessions_claude() -> None:
-    """Real sessions come back as summary dicts."""
+    """Real sessions come back as summary dicts inside a pagination envelope."""
     texts = _run(_call("list_sessions", {"agent": "claude"}))
-    sessions = [json.loads(t) for t in texts if t.strip().startswith("{")]
-    if sessions:
-        s = sessions[0]
-        assert "uuid" in s
-        assert "agent" in s
-        assert "title" in s
-        assert "date" in s
-        assert "message_count" in s
-        assert s["agent"] == "CLAUDE"
+    envelopes = [json.loads(t) for t in texts if t.strip().startswith("{")]
+    if envelopes:
+        data = envelopes[0]
+        assert data["offset"] == 0
+        assert isinstance(data["total"], int)
+        assert isinstance(data["truncated"], bool)
+        sessions = data["sessions"]
+        if sessions:
+            s = sessions[0]
+            assert "uuid" in s
+            assert "agent" in s
+            assert "title" in s
+            assert "date" in s
+            assert "message_count" in s
+            assert s["agent"] == "CLAUDE"
 
 
 # ---------------------------------------------------------------------------
@@ -411,10 +417,86 @@ def test_extract_messages_all_agents_dispatch() -> None:
 
 
 def test_list_sessions_invalid_agent_returns_error_dict() -> None:
-    """An unknown ``agent`` is surfaced as a structured error list."""
+    """An unknown ``agent`` is surfaced as a structured error dict."""
     result = list_sessions(agent="mystery")
-    assert isinstance(result, list)
-    assert result and result[0].get("error") == "invalid_argument"
+    assert isinstance(result, dict)
+    assert result.get("error") == "invalid_argument"
+
+
+def test_list_sessions_invalid_limit() -> None:
+    result = list_sessions(agent="claude", limit=-1)
+    assert isinstance(result, dict)
+    assert result.get("error") == "invalid_argument"
+    assert "limit" in result["message"].lower()
+
+
+def test_list_sessions_invalid_offset() -> None:
+    result = list_sessions(agent="claude", offset=-3)
+    assert isinstance(result, dict)
+    assert result.get("error") == "invalid_argument"
+    assert "offset" in result["message"].lower()
+
+
+def test_list_sessions_paginates_and_reports_total(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``limit``/``offset`` page the results; ``total``/``truncated`` reflect
+    the full matching set, not just the page."""
+    for i in range(5):
+        _write_claude_body_session(
+            tmp_sessions_dir=tmp_sessions_dir,
+            uuid=f"page-{i}",
+            user_text=f"user {i} text",
+            title=f"page session {i}",
+        )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+
+    first_page = list_sessions(agent="claude", limit=2, offset=0)
+    assert isinstance(first_page, dict)
+    assert first_page["total"] == 5
+    assert first_page["offset"] == 0
+    assert first_page["limit"] == 2
+    assert len(first_page["sessions"]) == 2
+    assert first_page["truncated"] is True
+
+    second_page = list_sessions(agent="claude", limit=2, offset=2)
+    assert len(second_page["sessions"]) == 2
+    assert second_page["truncated"] is True
+
+    last_page = list_sessions(agent="claude", limit=2, offset=4)
+    assert len(last_page["sessions"]) == 1
+    assert last_page["truncated"] is False
+
+    # pages don't overlap
+    uuids_a = {s["uuid"] for s in first_page["sessions"]}
+    uuids_b = {s["uuid"] for s in second_page["sessions"]}
+    assert uuids_a.isdisjoint(uuids_b)
+
+
+def test_list_sessions_limit_zero_is_uncapped(
+    tmp_sessions_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``limit=0`` returns every session in one page."""
+    for i in range(3):
+        _write_claude_body_session(
+            tmp_sessions_dir=tmp_sessions_dir,
+            uuid=f"uncapped-{i}",
+            user_text=f"user {i} text",
+            title=f"uncapped session {i}",
+        )
+    base = str(tmp_sessions_dir / ".claude" / "projects")
+    monkeypatch.setattr(
+        "ai_reader.parsers.claude._resolve_base_dir", lambda bd=None: Path(base)
+    )
+
+    result = list_sessions(agent="claude", limit=0)
+    assert result["total"] == 3
+    assert result["limit"] == 0
+    assert len(result["sessions"]) == 3
+    assert result["truncated"] is False
 
 
 def test_read_session_invalid_uuid_returns_error_dict() -> None:

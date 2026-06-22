@@ -42,6 +42,7 @@ __all__ = ["mcp", "main"]
 
 
 _MESSAGES_CAP = 100
+_LIST_LIMIT_DEFAULT = 100
 
 
 mcp = FastMCP(
@@ -183,27 +184,61 @@ def _extract_messages(
 
 
 @mcp.tool()
-def list_sessions(agent: Optional[str] = None) -> List[dict[str, Any]]:
+def list_sessions(
+    agent: Optional[str] = None,
+    limit: int = _LIST_LIMIT_DEFAULT,
+    offset: int = 0,
+) -> dict[str, Any]:
     """List discoverable sessions, optionally filtered by ``agent``.
+
+    Results are sorted by date (newest first) and paginated with
+    ``limit``/``offset`` so the payload stays small. The default ``limit``
+    guards against dumping an unbounded number of sessions.
 
     Args:
         agent: One of ``claude``, ``codex``, ``opencode``, ``antigravity``,
             ``pi``. When omitted, every supported agent is queried.
+        limit: Max sessions in this page. ``0`` means no cap (use with care:
+            may return a very large payload). Defaults to 100.
+        offset: Zero-based index of the first session to return. Use with
+            ``limit`` to page through ``total``.
 
     Returns:
-        A list of session summaries.
+        ``{"sessions": [...], "total": int, "offset": int, "limit": int,
+        "truncated": bool}``. ``total`` is the full count matching the
+        ``agent`` filter; ``truncated`` is True when more sessions remain
+        beyond this page.
     """
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+        return {"error": "invalid_argument",
+                "message": f"limit must be a non-negative integer, got {limit!r}"}
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        return {"error": "invalid_argument",
+                "message": f"offset must be a non-negative integer, got {offset!r}"}
     try:
         targets = _target_agents(agent)
     except ValueError as exc:
-        return [{"error": "invalid_argument", "message": str(exc)}]
+        return {"error": "invalid_argument", "message": str(exc)}
 
     summaries: List[dict[str, Any]] = []
     for agent_name in targets:
         parser = _PARSERS[agent_name]
         for session in parser.list_sessions():
             summaries.append(_session_summary(session))
-    return summaries
+
+    # Global newest-first sort: parsers sort per-agent, but across agents we
+    # merge into one timeline so offset/limit pages show the freshest sessions.
+    summaries.sort(key=lambda s: s.get("date") or "", reverse=True)
+
+    total = len(summaries)
+    page = summaries[offset:] if limit == 0 else summaries[offset:offset + limit]
+    return {
+        "sessions": page,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "truncated": (offset + len(page)) < total,
+    }
 
 
 @mcp.tool()
