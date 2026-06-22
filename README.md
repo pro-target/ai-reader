@@ -33,6 +33,20 @@ cannot:
 - **Cross-agent handoff & triage.** "What did the other agent do on
   this?" works across Claude, Codex, OpenCode, Antigravity, and Pi
   without learning five different log layouts.
+- **"Who touched this file, and when?"** Every edit to a path — across
+  every agent, every session — with timestamps. Time-box an audit: "what
+  did agents do to `src/auth.py` last week?" (see `find-file-edits`).
+- **Replay a session as a CHANGELOG round.** Render a session into
+  Goal / Status / Files touched / Decisions / Next-actions markdown — a
+  handoff doc you can paste into another agent or a standup (see
+  `export rounds`).
+- **"Which agent am I, and what session am I in?"** A script or an agent
+  bootstrapping fresh detects its own session UUID, then reads itself or
+  its predecessor to resume programmatically (see `detect-agent`,
+  `detect-session`).
+- **Search the bodies, not just titles.** "Find every session that
+  discussed `auth token`" — across all five agents, with snippets — via
+  body-scoped search with `AND`/`OR`/`NOT` operators.
 
 ## Quick Start (1 request)
 
@@ -98,18 +112,31 @@ The MCP server is auto-registered in your agent's config. Tools available:
 |---|---|
 | `list_sessions(agent?)` | List discoverable sessions, optionally filtered by agent. |
 | `read_session(uuid, agent)` | Read one session; returns up to 100 messages. |
+| `find_file_edits(path, agent?, since?, until?, limit?)` | Find every file edit across sessions for a given path, cross-agent by default, optionally time-boxed (`since`/`until` ISO 8601). |
 | `search_sessions(query, agent?, scope?, operator?, limit?)` | Search by title and/or message body, with `AND`/`OR`/`NOT` operators and Google-style `-term` exclusions. See [Search operators](#search-operators). |
 
 ### As a CLI (testing / scripts)
 
 ```bash
+# list / read / search
 ai-reader list --agent pi
 ai-reader read --agent pi <session-uuid>
 ai-reader search "refactor"
 ai-reader search "pwa manifest" --scope body --operator and --agent claude
+
+# who edited a file, across all agents, optionally time-boxed
+ai-reader find-file-edits src/auth.py --since 2026-06-01 --until 2026-06-30
+ai-reader find-file-edits "config" --agent claude --limit 20
+
+# which agent / session am I in (scripts, orchestration, self-resume)
+ai-reader detect-agent --quiet          # → e.g. "claude"
+ai-reader detect-session --json         # → candidate session UUIDs
+
+# render a session as a CHANGELOG round (handoff doc / replay)
+ai-reader export rounds <session-uuid> --include-round --output round.md
 ```
 
-Add `--json` to any subcommand for machine-readable output.
+Add `--json` to most subcommands for machine-readable output.
 
 ### Search operators
 
@@ -283,7 +310,7 @@ pip install -e ".[dev]"
 pytest --cov=src/ai_reader
 ```
 
-- 270 tests, ≥80% coverage required by CI
+- 345 tests, ≥80% coverage required by CI
 - Conventional Commits (`feat:`, `fix:`, `docs:`, …)
 - See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/parsers.md](./docs/parsers.md) for adding new agents
 
